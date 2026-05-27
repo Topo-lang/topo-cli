@@ -8,6 +8,9 @@
 # CLI flag, same as in the monorepo when the gate is OFF.
 
 add_executable(topo-profile main.cpp)
+# ALIAS for aggregated-build consumers that reference the executable
+# via the install-time NAMESPACE topo::cli::.
+add_executable(topo::cli::topo-profile ALIAS topo-profile)
 
 target_link_libraries(topo-profile PRIVATE
     topo::core::TopoPlatform

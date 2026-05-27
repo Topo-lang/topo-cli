@@ -7,6 +7,9 @@ add_executable(topo-init
     InitConfig.cpp
     TopoGenerator.cpp
 )
+# ALIAS for aggregated-build consumers that reference the executable
+# via the install-time NAMESPACE topo::cli::.
+add_executable(topo::cli::topo-init ALIAS topo-init)
 
 # Each plugin PUBLIC-links TopoLang; TopoLang PUBLIC-propagates
 # TopoCheck → TopoSema → TopoParser. Each plugin also propagates its

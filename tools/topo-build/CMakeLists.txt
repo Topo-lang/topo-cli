@@ -20,6 +20,10 @@ add_executable(topo-build
     main.cpp
     Config.cpp
 )
+# ALIAS so an aggregated parent build can reference this executable via
+# its namespaced name (matches the install-time NAMESPACE topo::cli::
+# under which downstream packages like topo-llvm/tools-late resolve it).
+add_executable(topo::cli::topo-build ALIAS topo-build)
 
 # topo-core's TopoBuildLib PUBLIC-propagates TopoPlatform / TopoSema /
 # TopoLang transitively. Each plugin aggregator PUBLIC-propagates

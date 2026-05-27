@@ -4,6 +4,9 @@
 # plus TopoLang, so the transpile driver reaches main.cpp transitively.
 
 add_executable(topo-transpile main.cpp)
+# ALIAS for aggregated-build consumers that reference the executable
+# via the install-time NAMESPACE topo::cli::.
+add_executable(topo::cli::topo-transpile ALIAS topo-transpile)
 
 target_link_libraries(topo-transpile PRIVATE
     topo::lang::TopoLang

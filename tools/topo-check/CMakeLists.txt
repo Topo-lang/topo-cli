@@ -38,6 +38,9 @@ install(FILES CheckRunner.h
 
 # ── topo-check CLI ─────────────────────────────────────
 add_executable(topo-check main.cpp)
+# ALIAS for aggregated-build consumers that reference the executable
+# via the install-time NAMESPACE topo::cli::.
+add_executable(topo::cli::topo-check ALIAS topo-check)
 target_link_libraries(topo-check PRIVATE TopoCheckRunner)
 if(_TOPO_CLI_PLUGIN_LINK_TARGETS)
     target_link_libraries(topo-check PRIVATE ${_TOPO_CLI_PLUGIN_LINK_TARGETS})

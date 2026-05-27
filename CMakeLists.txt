@@ -34,16 +34,28 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(TopoCliCompilerFlags)
 
 # ── Upstream Topo packages ──────────────────────────────
-find_package(topo-core CONFIG REQUIRED)
-find_package(topo-lang CONFIG REQUIRED)
+# Guarded find_package: a parent aggregator build (e.g. a meta-repo
+# add_subdirectory chain) may have already brought these in via direct
+# source inclusion, in which case the namespaced targets are live and
+# re-running find_package would either fail (no installed Config) or
+# clobber the source-tree targets. Sentinel-target skip is the
+# standalone-vs-aggregated dual-mode pattern.
+if(NOT TARGET topo::core::TopoBasic)
+    find_package(topo-core CONFIG REQUIRED)
+endif()
+if(NOT TARGET topo::lang::TopoLang)
+    find_package(topo-lang CONFIG REQUIRED)
+endif()
 
 # topo-v8 is only needed by topo-profile (SourceMapResolver) — make it
 # optional so a build without TS / V8-stack consumers can still produce
 # the other four CLIs.
 option(TOPO_CLI_ENABLE_PROFILE "Build the topo-profile CLI (requires topo-v8)" ON)
 if(TOPO_CLI_ENABLE_PROFILE)
-    find_package(topo-v8 CONFIG QUIET)
-    if(NOT topo-v8_FOUND)
+    if(NOT TARGET topo::v8::Topov8Placeholder)
+        find_package(topo-v8 CONFIG QUIET)
+    endif()
+    if(NOT TARGET topo::v8::Topov8Placeholder AND NOT topo-v8_FOUND)
         message(STATUS "topo-cli: topo-v8 not found; disabling topo-profile CLI (SourceMapResolver lives there)")
         set(TOPO_CLI_ENABLE_PROFILE OFF CACHE BOOL "" FORCE)
     endif()
@@ -85,14 +97,18 @@ foreach(entry IN LISTS _TOPO_CLI_PLUGIN_LIST)
         continue()
     endif()
 
-    find_package(topo-lang-${_lang_lower} CONFIG QUIET)
-    if(NOT topo-lang-${_lang_lower}_FOUND)
+    set(_plugin_target "topo::lang-${_lang_lower}::Topo${_lang_pascal}Plugin")
+    # Sentinel-guard: skip find_package when the plugin aggregator is
+    # already a live target (aggregated build via add_subdirectory).
+    if(NOT TARGET ${_plugin_target})
+        find_package(topo-lang-${_lang_lower} CONFIG QUIET)
+    endif()
+    if(NOT TARGET ${_plugin_target} AND NOT topo-lang-${_lang_lower}_FOUND)
         message(STATUS "topo-cli: topo-lang-${_lang_lower} not found; disabling ${_lang_lower} plugin")
         set(TOPO_CLI_ENABLE_${_lang_upper}_PLUGIN OFF CACHE BOOL "" FORCE)
         continue()
     endif()
 
-    set(_plugin_target "topo::lang-${_lang_lower}::Topo${_lang_pascal}Plugin")
     if(NOT TARGET ${_plugin_target})
         message(STATUS "topo-cli: topo-lang-${_lang_lower} found but ${_plugin_target} target missing (likely backend-scope-gated OFF upstream); disabling ${_lang_lower} plugin")
         set(TOPO_CLI_ENABLE_${_lang_upper}_PLUGIN OFF CACHE BOOL "" FORCE)
@@ -169,7 +185,7 @@ install(FILES
 # find_package smoke test and by running each installed CLI with
 # --help / --version.
 option(TOPO_CLI_BUILD_TESTS "Build topo-cli tests (no-op: no tests in this subtree)" OFF)
-if(TOPO_CLI_BUILD_TESTS AND PROJECT_IS_TOP_LEVEL)
+if(TOPO_CLI_BUILD_TESTS AND (PROJECT_IS_TOP_LEVEL OR TOPO_META_DRIVING_TESTS))
     enable_testing()
     message(STATUS "topo-cli: no in-tree tests; verification is via the find_package smoke step.")
 endif()

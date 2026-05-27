@@ -39,5 +39,16 @@ function(topo_cli_set_compiler_flags target)
 endfunction()
 
 # PCH helpers — no-ops in standalone (no project-wide PCH host).
-function(topo_apply_std_pch target)
-endfunction()
+#
+# Guarded so an aggregated parent build that already defined these
+# functions (e.g. the monorepo's cmake/TopoCompilerFlags.cmake) keeps
+# its real implementation; only define the no-op stubs when nobody else
+# has.
+if(NOT COMMAND topo_apply_std_pch)
+    function(topo_apply_std_pch target)
+    endfunction()
+endif()
+if(NOT COMMAND topo_apply_std_pch_llvm)
+    function(topo_apply_std_pch_llvm target)
+    endfunction()
+endif()
