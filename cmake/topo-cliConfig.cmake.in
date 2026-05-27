@@ -1,0 +1,47 @@
+@PACKAGE_INIT@
+
+# topo-cli CMake package config.
+#
+# Consumers do:
+#     find_package(topo-cli CONFIG REQUIRED)
+#
+#     # Link the check-runner library directly:
+#     target_link_libraries(my-e2e-harness PRIVATE topo::cli::TopoCheckRunner)
+#
+#     # Or invoke installed CLIs (topo-check, topo-build, topo-init,
+#     # topo-transpile, topo-profile) as subprocesses — their paths are
+#     # exposed as imported executable targets under topo::cli::.
+#
+# The set of language plugins each plugin-dispatching CLI links was
+# fixed at build time: each TOPO_CLI_WITH_<LANG>_PLUGIN compile def
+# baked into the CLI binary reflects which Topo<Lang>Plugin aggregator
+# was linked. find_dependency rehydrates the corresponding
+# topo-lang-<lang> package at consume time so transitive ABI / runtime
+# resources are reachable.
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(topo-core CONFIG)
+find_dependency(topo-lang CONFIG)
+find_dependency(nlohmann_json CONFIG)
+
+# Re-find each language plugin package that was linked at build time.
+# Names are pasted in by configure_package_config_file at install time
+# so the consumer doesn't have to know which subset was on.
+set(_TOPO_CLI_LINKED_PLUGINS "@_TOPO_CLI_RESOLVED_PLUGINS@")
+foreach(entry IN LISTS _TOPO_CLI_LINKED_PLUGINS)
+    string(REPLACE ":" ";" _parts "${entry}")
+    list(GET _parts 0 _lang_lower)
+    find_dependency(topo-lang-${_lang_lower} CONFIG)
+endforeach()
+
+# topo-v8 is brought in only if the topo-profile CLI was built
+# (SourceMapResolver lives in topo-v8/lib/Debug/).
+set(_TOPO_CLI_HAS_PROFILE "@TOPO_CLI_ENABLE_PROFILE@")
+if(_TOPO_CLI_HAS_PROFILE)
+    find_dependency(topo-v8 CONFIG)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/topo-cliTargets.cmake")
+
+check_required_components(topo-cli)

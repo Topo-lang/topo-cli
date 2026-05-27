@@ -1,0 +1,252 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TOPO_CORE_REF: main
+  TOPO_LANG_REF: main
+  TOPO_V8_REF: main
+  TOPO_LANG_JAVA_REF: main
+  TOPO_LANG_PYTHON_REF: main
+  TOPO_LANG_TYPESCRIPT_REF: main
+  # cpp / rust plugin aggregators are gated upstream by TOPO_LANG_<L>_ENABLE_LLVM
+  # and not in their default install set yet; topo-cli auto-detects their
+  # absence and disables those plugins (auto-handled, no CI work needed).
+
+jobs:
+  build-and-test:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build openjdk-17-jdk python3 python3-pip nodejs npm
+
+      - name: Install build deps (macos)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja openjdk@17 python@3.12 node || true
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Export GHA cache env (for vcpkg x-gha backend)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: "56bb2411609227288b70117ead2c47585ba07713"
+
+      - name: Cache upstream topo install
+        id: topo-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/topo-install
+          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v3
+
+      - name: Build & install topo-core (zero-LLVM, lang-less)
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_CORE_REF}" \
+              https://github.com/topo-lang/topo-core.git \
+              "${RUNNER_TEMP}/topo-core-src"
+          cmake -S "${RUNNER_TEMP}/topo-core-src" \
+                -B "${RUNNER_TEMP}/topo-core-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_ENABLE_LLVM=OFF
+          cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
+
+      - name: Build & install topo-lang
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_REF}" \
+              https://github.com/topo-lang/topo-lang.git \
+              "${RUNNER_TEMP}/topo-lang-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-src" \
+                -B "${RUNNER_TEMP}/topo-lang-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+          cmake --build "${RUNNER_TEMP}/topo-lang-build" --target install
+
+      - name: Re-install topo-core (with-lang)
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S "${RUNNER_TEMP}/topo-core-src" \
+                -B "${RUNNER_TEMP}/topo-core-build" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install"
+          cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
+
+      - name: Build & install topo-v8
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_V8_REF}" \
+              https://github.com/topo-lang/topo-v8.git \
+              "${RUNNER_TEMP}/topo-v8-src"
+          cmake -S "${RUNNER_TEMP}/topo-v8-src" \
+                -B "${RUNNER_TEMP}/topo-v8-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+          cmake --build "${RUNNER_TEMP}/topo-v8-build" --target install
+
+      - name: Build & install topo-lang-java
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_JAVA_REF}" \
+              https://github.com/topo-lang/topo-lang-java.git \
+              "${RUNNER_TEMP}/topo-lang-java-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-java-src" \
+                -B "${RUNNER_TEMP}/topo-lang-java-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_JAVA_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-lang-java-build" --target install
+
+      - name: Build & install topo-lang-python
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_PYTHON_REF}" \
+              https://github.com/topo-lang/topo-lang-python.git \
+              "${RUNNER_TEMP}/topo-lang-python-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-python-src" \
+                -B "${RUNNER_TEMP}/topo-lang-python-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_PYTHON_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-lang-python-build" --target install
+
+      - name: Build & install topo-lang-typescript
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_TYPESCRIPT_REF}" \
+              https://github.com/topo-lang/topo-lang-typescript.git \
+              "${RUNNER_TEMP}/topo-lang-typescript-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-typescript-src" \
+                -B "${RUNNER_TEMP}/topo-lang-typescript-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_TYPESCRIPT_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-lang-typescript-build" --target install
+
+      - name: Configure topo-cli
+        run: |
+          cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+              -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Install topo-cli
+        run: cmake --install build --prefix "${RUNNER_TEMP}/cli-install"
+
+      - name: Smoke — run each installed CLI with --help
+        run: |
+          for tool in topo-check topo-build topo-init topo-transpile topo-profile; do
+              if [ -x "${RUNNER_TEMP}/cli-install/bin/${tool}" ]; then
+                  echo "--- ${tool} ---"
+                  "${RUNNER_TEMP}/cli-install/bin/${tool}" --help 2>&1 | head -5 || true
+              else
+                  echo "--- ${tool} not installed (gated OFF) ---"
+              fi
+          done
+
+      - name: find_package smoke
+        run: |
+          mkdir -p "${RUNNER_TEMP}/find-package-smoke"
+          cd "${RUNNER_TEMP}/find-package-smoke"
+          cat > vcpkg.json <<'JSON'
+          {
+            "name": "topo-cli-smoke",
+            "version-string": "0.0.1",
+            "builtin-baseline": "56bb2411609227288b70117ead2c47585ba07713",
+            "dependencies": ["nlohmann-json", "tomlplusplus"]
+          }
+          JSON
+          cat > CMakeLists.txt <<'CMAKE'
+          cmake_minimum_required(VERSION 3.20)
+          project(topo-cli-find-package-smoke LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          find_package(topo-cli CONFIG REQUIRED)
+          if(NOT TARGET topo::cli::TopoCheckRunner)
+              message(FATAL_ERROR "topo::cli::TopoCheckRunner target was not imported")
+          endif()
+          if(NOT TARGET topo::cli::topo-check)
+              message(FATAL_ERROR "topo::cli::topo-check executable target was not imported")
+          endif()
+          add_executable(smoke smoke.cpp)
+          target_link_libraries(smoke PRIVATE topo::cli::TopoCheckRunner)
+          target_compile_definitions(smoke PRIVATE
+              TOPO_CHECK_BIN="$<TARGET_FILE:topo::cli::topo-check>")
+          # MinGW on GHA can't reliably resolve the runner's libstdc++/libgcc
+          # DLLs against the cached upstream install; static-link the
+          # downstream smoke so it's hermetic.
+          if(MINGW)
+              target_link_options(smoke PRIVATE -static -static-libgcc -static-libstdc++)
+          endif()
+          CMAKE
+          cat > smoke.cpp <<'CPP'
+          #include "CheckRunner.h"
+          #include <cstdio>
+          #include <filesystem>
+          int main() {
+              topo::CheckConfig cfg;
+              cfg.projectDir = ".";
+              cfg.checkName = "all";
+              topo::CheckRunner runner(cfg);
+              if (!std::filesystem::exists(TOPO_CHECK_BIN)) return 2;
+              std::printf("topo-cli find_package OK (topo-check=%s)\n", TOPO_CHECK_BIN);
+              return 0;
+          }
+          CPP
+          cmake -S . -B build -G Ninja \
+              -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/cli-install;${RUNNER_TEMP}/topo-install" \
+              -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build
+          ./build/smoke

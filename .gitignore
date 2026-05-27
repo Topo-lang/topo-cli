@@ -1,0 +1,14 @@
+/build/
+/build-*/
+/out/
+.cache/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+vcpkg_installed/
