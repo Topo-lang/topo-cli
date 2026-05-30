@@ -3,6 +3,7 @@
 #include "topo/Build/ConfigValidator.h"
 #include "topo/Platform/Platform.h"
 #include "topo/Platform/FileGlob.h"
+#include "topo/Platform/SharedLibrary.h"  // platform::getExecutableDir()
 
 // toml++ as header-only, no-exception mode (LLVM is built with -fno-rtti)
 #define TOML_HEADER_ONLY 1
@@ -369,6 +370,31 @@ bool loadTopoToml(BuildConfig& cfg) {
             for (const auto& elem : *includes) {
                 if (auto dir = elem.value<std::string>()) {
                     cfg.includeDirs.push_back((baseDir / *dir).string());
+                }
+            }
+        }
+    }
+
+    // Binary-relative stdlib include fallback. The project's `include` paths
+    // above are resolved relative to Topo.toml; in a standalone build outside
+    // the meta sibling layout (e.g. a benchmark whose include list points at
+    // `../../../topo-lang-cpp/runtime/include`), the topo-lang-cpp stdlib
+    // headers (`<topo/...>`) those paths target may not exist on disk. The
+    // toolchain's own installed headers live next to the binary at
+    // <prefix>/include (topo-build installs to <prefix>/bin/topo-build), so add
+    // that directory as a fallback search path — letting `#include <topo/...>`
+    // resolve without a manual -I or a build-side header symlink. Added only
+    // when it exists, so an uninstalled build-tree layout is unaffected.
+    {
+        fs::path exeDir = platform::getExecutableDir();
+        if (!exeDir.empty()) {
+            fs::path prefixInclude = exeDir.parent_path() / "include";
+            std::error_code ec;
+            if (fs::is_directory(prefixInclude, ec)) {
+                std::string p = prefixInclude.string();
+                if (std::find(cfg.includeDirs.begin(), cfg.includeDirs.end(), p)
+                    == cfg.includeDirs.end()) {
+                    cfg.includeDirs.push_back(p);
                 }
             }
         }
