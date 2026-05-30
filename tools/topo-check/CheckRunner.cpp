@@ -842,8 +842,8 @@ check::CheckResult CheckRunner::runContainment() {
     // Guard: if source files exist but ALL three extractors returned nothing,
     // extraction has truly failed and proceeding would silently report 0 violations.
     // This is stricter than the old "imports + callsites empty" check, which
-    // misclassified clean files (no #include, no unsafe patterns) as failures.
-    // See checker-empty-extraction-error-misclassifies-clean-fixtures.md.
+    // misclassified clean files (no #include, no unsafe patterns) as
+    // extraction failures.
     if (!sourceFiles.empty() && imports.empty() && callSites.empty() &&
         hostSymbols.empty()) {
         check::CheckDiagnostic d;

@@ -187,8 +187,8 @@ int main(int argc, char* argv[]) {
     // projects in parallel) race — process A's cleanup deletes process B's
     // intermediate `optimized.ll` before B can write to it. Failure manifests
     // as `error: cannot write IR: No such file or directory` deep in
-    // LLVMTransformBackend::writeIR. See issue
-    // `live/40-issue/topo-build-tempdir-race.md`.
+    // LLVMTransformBackend::writeIR. Regression guard for the concurrent
+    // topo-build temp-directory cleanup race.
     fs::path tempDir = topo::platform::tempDirectory()
         / ("topo-build-" + std::to_string(TOPO_GETPID()));
     fs::create_directories(tempDir);
