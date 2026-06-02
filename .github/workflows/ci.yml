@@ -22,8 +22,13 @@ env:
   # absence and disables those plugins (auto-handled, no CI work needed).
 
 jobs:
-  build-and-test:
-    name: build + test (${{ matrix.os }})
+  build-and-smoke:
+    # topo-cli is a thin per-language router with no in-tree unit tests by
+    # design — its behavior is verified by the downstream checker / e2e suites
+    # in the topo-lang-* packages (which install the real CLI). So this job is
+    # build + smoke (CLI install + launch), NOT a test job; naming it
+    # "build + test" implied coverage it never had.
+    name: build + smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -186,16 +191,32 @@ jobs:
       - name: Install topo-cli
         run: cmake --install build --prefix "${RUNNER_TEMP}/cli-install"
 
-      - name: Smoke — run each installed CLI with --help
+      - name: Smoke — verify each CLI installed + launches
         run: |
+          set -euo pipefail
+          fail=0
           for tool in topo-check topo-build topo-init topo-transpile topo-profile; do
-              if [ -x "${RUNNER_TEMP}/cli-install/bin/${tool}" ]; then
-                  echo "--- ${tool} ---"
-                  "${RUNNER_TEMP}/cli-install/bin/${tool}" --help 2>&1 | head -5 || true
-              else
-                  echo "--- ${tool} not installed (gated OFF) ---"
+              bin="${RUNNER_TEMP}/cli-install/bin/${tool}"
+              # Windows installs ${tool}.exe; resolve it so the check is real
+              # on all three platforms (the old no-.exe path silently no-op'd
+              # the Windows smoke).
+              [ -x "$bin" ] || bin="${bin}.exe"
+              if [ ! -x "$bin" ]; then
+                  echo "MISSING: ${tool} not installed under ${RUNNER_TEMP}/cli-install/bin"
+                  fail=1
+                  continue
               fi
+              echo "--- ${tool} ---"
+              # --help is informational only: topo-build and topo-profile
+              # intentionally exit non-zero on --help, so the load-bearing
+              # assertion is that the binary exists + launches, not the --help
+              # exit code.
+              "$bin" --help 2>&1 | head -5 || true
           done
+          if [ "$fail" -ne 0 ]; then
+              echo "One or more CLI tools were not installed — failing the smoke."
+              exit 1
+          fi
 
       - name: find_package smoke
         run: |
