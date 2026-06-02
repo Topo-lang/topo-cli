@@ -823,7 +823,14 @@ void autoExtension(std::string& outputPath, OutputType outputType) {
 
     switch (outputType) {
     case OutputType::Exe:
-        if (!plat::ExeSuffix.empty() && !hasSuffix(plat::ExeSuffix)) outputPath += std::string(plat::ExeSuffix);
+        // A JVM target is an Exe-type whose artifact is a `.jar` — a complete,
+        // self-describing name to which the native exe suffix is never correct.
+        // Without this guard, Windows (ExeSuffix == ".exe") writes `foo.jar.exe`,
+        // which `java -jar` cannot run and which mislocates the .topo-passes
+        // sidecar. Native cpp/rust exes never end in `.jar`, so they are
+        // unaffected. (On POSIX ExeSuffix is empty, so this case is a no-op.)
+        if (!plat::ExeSuffix.empty() && !hasSuffix(plat::ExeSuffix) && !hasSuffix(".jar"))
+            outputPath += std::string(plat::ExeSuffix);
         break;
     case OutputType::Shared:
         if (!hasSuffix(plat::SharedLibSuffix)) outputPath += std::string(plat::SharedLibSuffix);
