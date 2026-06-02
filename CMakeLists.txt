@@ -4,7 +4,11 @@ project(topo-cli
     VERSION 0.1.0
     DESCRIPTION "Topo plugin-dispatch CLI tools — topo-check / topo-build / topo-init / topo-transpile / topo-profile"
     HOMEPAGE_URL "https://github.com/topo-lang/topo-cli"
-    LANGUAGES CXX
+    # C is enabled alongside CXX so transitive check_include_file() probes work
+    # (e.g. LLVM's libedit/histedit.h check, reached via find_package(LLVM) on
+    # macOS where readline is absent). Without C enabled those C-language checks
+    # abort configure with "Unknown extension .c". topo-cli has no .c sources.
+    LANGUAGES C CXX
 )
 
 # topo-cli — the top-level consumer that hosts the five plugin-dispatch
