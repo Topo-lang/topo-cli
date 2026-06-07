@@ -377,8 +377,17 @@ std::optional<json> transformSpan(const std::string& raw,
 
     std::string name = src["name"].get<std::string>();
     int64_t durationNs = src["duration_ns"].get<int64_t>();
-    int64_t tsNs = src.value("ts_ns", static_cast<int64_t>(0));
-    int64_t tid = src.value("thread_id", static_cast<int64_t>(0));
+    // ts_ns / thread_id are optional. value() forwards to get<int64_t>() when
+    // the key is PRESENT with a non-integer type, which throws json::type_error
+    // (no exception barrier up to main). Type-check before reading — mirroring
+    // the duration_ns guard above — so a wrong-typed or float-valued field
+    // defaults to 0 rather than crashing the trace run.
+    int64_t tsNs = (src.contains("ts_ns") && src["ts_ns"].is_number_integer())
+                       ? src["ts_ns"].get<int64_t>()
+                       : 0;
+    int64_t tid = (src.contains("thread_id") && src["thread_id"].is_number_integer())
+                      ? src["thread_id"].get<int64_t>()
+                      : 0;
 
     json out = json::object();
     out["name"] = name;
@@ -423,9 +432,19 @@ bool routePassEvent(const std::string& raw, json& passEvents) {
 
     std::string pass = src["pass"].get<std::string>();
     json ev = json::object();
-    ev["ts_ns"] = src.value("ts_ns", static_cast<int64_t>(0));
-    ev["from"] = src.value("from", std::string{});
-    ev["to"] = src.value("to", std::string{});
+    // ts_ns / from / to are optional. value() throws json::type_error when the
+    // key is present with a non-matching type (e.g. "ts_ns":"oops" or
+    // "from":123); a crafted pass-event line on the target's stdout must be
+    // skipped, not abort the process. Type-check before reading.
+    ev["ts_ns"] = (src.contains("ts_ns") && src["ts_ns"].is_number_integer())
+                      ? src["ts_ns"].get<int64_t>()
+                      : static_cast<int64_t>(0);
+    ev["from"] = (src.contains("from") && src["from"].is_string())
+                     ? src["from"].get<std::string>()
+                     : std::string{};
+    ev["to"] = (src.contains("to") && src["to"].is_string())
+                   ? src["to"].get<std::string>()
+                   : std::string{};
     // `subject` is optional on the wire; preserve "omit rather than
     // invent" — only surface it when the producer set it.
     if (src.contains("subject") && src["subject"].is_string() &&

@@ -48,6 +48,10 @@ namespace topo {
 
 namespace {
 
+// On-disk version for `.topo-check-cache`. Bumped to 3 when `deep` was added
+// to the cache key so older (mode-blind) caches invalidate on read.
+constexpr int CHECK_CACHE_VERSION = 3;
+
 // Small internal thread pool. File-level workers pull tasks from a FIFO queue.
 // Lifetime scoped to the `parallelMap` helper below — workers exit when all
 // tasks complete and join on scope exit.
@@ -191,14 +195,21 @@ std::vector<std::string> CheckRunner::discoverRelevantFiles() const {
     // Topo.toml
     fs::path tomlPath = fs::path(config_.projectDir) / "Topo.toml";
     if (fs::exists(tomlPath)) {
-        files.push_back(fs::canonical(tomlPath).string());
+        std::error_code tomlEc;
+        auto canonicalToml = fs::canonical(tomlPath, tomlEc);
+        if (!tomlEc) files.push_back(canonicalToml.string());
     }
 
     // All .topo files under the project directory
     std::error_code ec;
     for (const auto& entry : fs::recursive_directory_iterator(config_.projectDir, ec)) {
         if (entry.is_regular_file() && entry.path().extension() == ".topo") {
-            files.push_back(fs::canonical(entry.path()).string());
+            // Use the non-throwing overload: a dangling symlink or a file
+            // removed mid-scan (TOCTOU) must degrade to skipping the entry,
+            // not abort the process (main() has no exception barrier).
+            std::error_code ec1;
+            auto canonicalEntry = fs::canonical(entry.path(), ec1);
+            if (!ec1) files.push_back(canonicalEntry.string());
         }
     }
 
@@ -227,29 +238,38 @@ bool CheckRunner::tryCacheHit(int& cachedResult) {
     if (!ifs) return false;
 
     nlohmann::json cache;
+    // A single guard covers both the parse and the typed accesses below: a
+    // corrupted or type-mismatched cache (e.g. a non-object root, or a hash
+    // value that is not a string) must degrade to a cache miss, not throw a
+    // json::type_error out of an un-try/catch'd main().
     try {
         ifs >> cache;
-    } catch (...) {
+
+        if (cache.value("version", 0) != CHECK_CACHE_VERSION) return false;
+
+        // L1 (regex) and L2 (--deep) take different analysis paths and can
+        // produce different verdicts. The cache must not be shared across
+        // modes, or a deep run silently reuses a stale L1 PASS.
+        if (cache.value("deep", false) != config_.deepMode) return false;
+
+        auto cachedFiles = cache.value("files", nlohmann::json::object());
+        auto currentFiles = discoverRelevantFiles();
+
+        // File count mismatch → files added or removed
+        if (currentFiles.size() != cachedFiles.size()) return false;
+
+        // Verify every file hash matches
+        for (const auto& path : currentFiles) {
+            auto it = cachedFiles.find(path);
+            if (it == cachedFiles.end()) return false;
+            if (hashFile(path) != it->get<std::string>()) return false;
+        }
+
+        cachedResult = cache.value("result", -1);
+        return cachedResult >= 0;
+    } catch (const nlohmann::json::exception&) {
         return false;
     }
-
-    if (cache.value("version", 0) != 2) return false;
-
-    auto cachedFiles = cache.value("files", nlohmann::json::object());
-    auto currentFiles = discoverRelevantFiles();
-
-    // File count mismatch → files added or removed
-    if (currentFiles.size() != cachedFiles.size()) return false;
-
-    // Verify every file hash matches
-    for (const auto& path : currentFiles) {
-        auto it = cachedFiles.find(path);
-        if (it == cachedFiles.end()) return false;
-        if (hashFile(path) != it->get<std::string>()) return false;
-    }
-
-    cachedResult = cache.value("result", -1);
-    return cachedResult >= 0;
 }
 
 void CheckRunner::saveCheckCache(int result) {
@@ -259,7 +279,10 @@ void CheckRunner::saveCheckCache(int result) {
     auto currentFiles = discoverRelevantFiles();
 
     nlohmann::json cache;
-    cache["version"] = 2;
+    cache["version"] = CHECK_CACHE_VERSION;
+    // Mode discriminator: keep L1 and L2 (--deep) verdicts in separate cache
+    // entries so a mode switch is treated as a cache miss (see tryCacheHit).
+    cache["deep"] = config_.deepMode;
 
     nlohmann::json filesObj = nlohmann::json::object();
     for (const auto& path : currentFiles) {

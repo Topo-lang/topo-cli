@@ -315,7 +315,9 @@ int main(int argc, char* argv[]) {
     // ================================================================
     if (useIncremental) {
         CacheManifest newManifest;
-        newManifest.version = 1;
+        // Rely on CacheManifest's default version (matches the loader's
+        // required CACHE_VERSION); a hardcoded literal here drifts from the
+        // loader and silently disables the frontend cache.
         newManifest.configFingerprint = IncrementalCache::computeConfigFingerprint(cfg);
 
         // Record .topo file mtimes

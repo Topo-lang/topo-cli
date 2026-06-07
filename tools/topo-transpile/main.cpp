@@ -51,6 +51,17 @@ static void printUsage(const char* argv0) {
               << "  topo-transpile --from topo --to rust app.topo\n";
 }
 
+/// Whether `lang` is a host language topo-transpile accepts for --from/--to.
+/// `topo::parseHostLanguage` silently maps any unknown name to Cpp, so an
+/// unvalidated `--from xyz` would be transpiled as if it were C++ instead of
+/// being rejected. The accepted set mirrors the documented usage string
+/// (cpp/rust/java/python/typescript); "mixed" and "topo" are NOT host
+/// languages here and are handled separately by the caller.
+static bool isSupportedHostLanguage(const std::string& lang) {
+    return lang == "cpp" || lang == "rust" || lang == "java" ||
+           lang == "python" || lang == "typescript";
+}
+
 /// Split a comma-separated string into a vector of trimmed tokens.
 static std::vector<std::string> splitComma(const std::string& input) {
     std::vector<std::string> result;
@@ -222,6 +233,20 @@ int main(int argc, char* argv[]) {
     // is the source. The host-source extractor is bypassed; --sources is not
     // required and is ignored if given.
     const bool fromTopoSource = (fromLang == "topo");
+
+    // Reject unknown languages explicitly. parseHostLanguage() defaults any
+    // unrecognized name to C++, which would silently transpile e.g.
+    // `--from xyz` as C++ rather than reporting the typo.
+    if (!fromTopoSource && !isSupportedHostLanguage(fromLang)) {
+        std::cerr << "error: unsupported --from language '" << fromLang
+                  << "' (expected cpp/rust/java/python/typescript or topo)\n";
+        return 1;
+    }
+    if (!isSupportedHostLanguage(toLang)) {
+        std::cerr << "error: unsupported --to language '" << toLang
+                  << "' (expected cpp/rust/java/python/typescript)\n";
+        return 1;
+    }
 
     if (!fromTopoSource && fromLang == toLang) {
         std::cerr << "error: source and target languages must differ\n";
