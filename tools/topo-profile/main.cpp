@@ -54,11 +54,14 @@
 
 #include "SourceMapResolver.h"
 
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -357,6 +360,33 @@ bool readLine(topo::platform::PipedProcess& p, std::string& line) {
     }
 }
 
+// Read an optional ns timestamp/id field that may legitimately arrive as
+// either a JSON integer or a JSON float (some emitters serialize ns counts
+// through a double). A float must NOT be silently dropped to the `0` default
+// (that loses real data); convert it deterministically by rounding to the
+// nearest int64, clamping at the int64 bounds so an out-of-range double cannot
+// invoke the UB of a double→int64 cast. A non-numeric or absent field returns
+// `fallback`.
+int64_t readOptionalNsField(const json& src, const char* key, int64_t fallback) {
+    auto it = src.find(key);
+    if (it == src.end()) return fallback;
+    if (it->is_number_integer()) return it->get<int64_t>();
+    if (it->is_number_float()) {
+        double v = it->get<double>();
+        if (std::isnan(v)) return fallback;  // NaN has no deterministic int64
+        // std::llround on a value past the int64 range is UB; clamp first.
+        constexpr double kMax =
+            static_cast<double>(std::numeric_limits<int64_t>::max());
+        constexpr double kMin =
+            static_cast<double>(std::numeric_limits<int64_t>::min());
+        if (v >= kMax) return std::numeric_limits<int64_t>::max();
+        if (v <= kMin) return std::numeric_limits<int64_t>::min();
+        return static_cast<int64_t>(std::llround(v));
+    }
+    // Wrong-typed (string / bool / object) field: fall back rather than throw.
+    return fallback;
+}
+
 // Transform a single libtopo-observe NDJSON record into a trace
 // span object. Returns std::nullopt for lines that don't parse as the
 // expected shape (so the caller skips non-span output like assertions
@@ -379,15 +409,12 @@ std::optional<json> transformSpan(const std::string& raw,
     int64_t durationNs = src["duration_ns"].get<int64_t>();
     // ts_ns / thread_id are optional. value() forwards to get<int64_t>() when
     // the key is PRESENT with a non-integer type, which throws json::type_error
-    // (no exception barrier up to main). Type-check before reading — mirroring
-    // the duration_ns guard above — so a wrong-typed or float-valued field
-    // defaults to 0 rather than crashing the trace run.
-    int64_t tsNs = (src.contains("ts_ns") && src["ts_ns"].is_number_integer())
-                       ? src["ts_ns"].get<int64_t>()
-                       : 0;
-    int64_t tid = (src.contains("thread_id") && src["thread_id"].is_number_integer())
-                      ? src["thread_id"].get<int64_t>()
-                      : 0;
+    // (no exception barrier up to main). readOptionalNsField type-checks before
+    // reading — mirroring the duration_ns guard above — so a wrong-typed field
+    // defaults to 0; a FLOAT field is converted deterministically (rounded,
+    // clamped) rather than silently truncated to 0.
+    int64_t tsNs = readOptionalNsField(src, "ts_ns", 0);
+    int64_t tid = readOptionalNsField(src, "thread_id", 0);
 
     json out = json::object();
     out["name"] = name;
@@ -398,7 +425,15 @@ std::optional<json> transformSpan(const std::string& raw,
     // start as end - duration. Both are absolute ns timestamps from the
     // runtime's steady clock, so they are comparable within a single run.
     out["start_ns"] = tsNs;
-    out["end_ns"] = tsNs + durationNs;
+    // tsNs + durationNs on two int64 values can overflow — signed overflow is
+    // UB, not a wraparound. Use a checked add and saturate to INT64_MAX/MIN on
+    // overflow so an extreme (or crafted) duration_ns cannot trip UB.
+    int64_t endNs = 0;
+    if (__builtin_add_overflow(tsNs, durationNs, &endNs)) {
+        endNs = durationNs >= 0 ? std::numeric_limits<int64_t>::max()
+                                : std::numeric_limits<int64_t>::min();
+    }
+    out["end_ns"] = endNs;
     out["tid"] = tid;
     out["backend"] = backend;
     out["annotations"] = json::object();
@@ -435,10 +470,10 @@ bool routePassEvent(const std::string& raw, json& passEvents) {
     // ts_ns / from / to are optional. value() throws json::type_error when the
     // key is present with a non-matching type (e.g. "ts_ns":"oops" or
     // "from":123); a crafted pass-event line on the target's stdout must be
-    // skipped, not abort the process. Type-check before reading.
-    ev["ts_ns"] = (src.contains("ts_ns") && src["ts_ns"].is_number_integer())
-                      ? src["ts_ns"].get<int64_t>()
-                      : static_cast<int64_t>(0);
+    // skipped, not abort the process. readOptionalNsField type-checks before
+    // reading and converts a float ts_ns deterministically (same contract as
+    // the span path) instead of silently dropping it to 0.
+    ev["ts_ns"] = readOptionalNsField(src, "ts_ns", 0);
     ev["from"] = (src.contains("from") && src["from"].is_string())
                      ? src["from"].get<std::string>()
                      : std::string{};

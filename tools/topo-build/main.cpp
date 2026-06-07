@@ -219,8 +219,14 @@ int main(int argc, char* argv[]) {
         for (const auto& mod : modules)
             topoPaths.push_back(mod.path);
 
-        if (cache.isTopoFrontendValid(manifest, topoPaths) && cache.loadSymbolTable(symbols) &&
-            cache.loadVisibilityEntries(visEntries)) {
+        // isCompileConfigValid is load-bearing here: mtimes only catch .topo
+        // edits, not compile-affecting config changes (compiler, standard,
+        // include dirs, sources, output type, ...). The fingerprint is written
+        // into the manifest below, so without comparing it a build whose config
+        // changed while .topo files were untouched would reuse stale cached
+        // symbols/visibility. A mismatch must invalidate the frontend cache.
+        if (cache.isTopoFrontendValid(manifest, topoPaths) && cache.isCompileConfigValid(manifest, cfg) &&
+            cache.loadSymbolTable(symbols) && cache.loadVisibilityEntries(visEntries)) {
             topoCacheHit = true;
             std::cerr << "[1/7] .topo cache hit (skipping parse)\n";
             std::cerr << "[2/7] .topo cache hit (skipping sema)\n";
@@ -333,7 +339,15 @@ int main(int argc, char* argv[]) {
             newManifest.topoTomlMtime = IncrementalCache::getFileMtime(tomlPath);
         }
 
-        cache.saveManifest(newManifest);
+        // Surface a failed manifest write rather than claiming a cache write
+        // succeeded — a manifest that fails to persist while symbols/visibility
+        // were written would leave the cache inconsistent (no version gate on
+        // disk) for the next build. Non-fatal: the build proceeds, but the user
+        // is warned that incremental reuse will not happen next time.
+        if (!cache.saveManifest(newManifest)) {
+            std::cerr << "warning: failed to write incremental cache manifest; "
+                         "next build will not reuse the frontend cache\n";
+        }
     }
 
     // ================================================================

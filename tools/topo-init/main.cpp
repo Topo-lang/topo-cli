@@ -51,9 +51,15 @@ int main(int argc, char* argv[]) {
     if (cfg.autoDetectLanguage) {
         cfg.language = topo::init::detectLanguage(cfg.projectDir);
         if (cfg.verbose) {
-            const char* langStr = cfg.language == topo::HostLanguage::Rust   ? "rust"
-                                  : cfg.language == topo::HostLanguage::Java ? "java"
-                                                                             : "cpp";
+            // Map every detectable language; previously Python/TypeScript fell
+            // through to the literal "cpp", so a detected Python project
+            // printed "Detected language: cpp".
+            const char* langStr =
+                cfg.language == topo::HostLanguage::Rust         ? "rust"
+                : cfg.language == topo::HostLanguage::Java       ? "java"
+                : cfg.language == topo::HostLanguage::Python     ? "python"
+                : cfg.language == topo::HostLanguage::TypeScript ? "typescript"
+                                                                 : "cpp";
             std::cerr << "Detected language: " << langStr << "\n";
         }
     }
@@ -113,12 +119,18 @@ int main(int argc, char* argv[]) {
     std::string projectName = fs::path(fs::absolute(cfg.projectDir)).filename().string();
     topo::init::TopoGenerator gen(cfg.language, projectName);
 
-    // Determine sources glob for Topo.toml
+    // Determine sources glob for Topo.toml. Each language gets its own
+    // extension; Python/TypeScript previously fell through to "src/**/*.cpp",
+    // writing a glob that matched none of their sources.
     std::string sourcesGlob;
     if (cfg.language == topo::HostLanguage::Rust)
         sourcesGlob = "src/**/*.rs";
     else if (cfg.language == topo::HostLanguage::Java)
         sourcesGlob = "src/**/*.java";
+    else if (cfg.language == topo::HostLanguage::Python)
+        sourcesGlob = "src/**/*.py";
+    else if (cfg.language == topo::HostLanguage::TypeScript)
+        sourcesGlob = "src/**/*.ts";
     else
         sourcesGlob = "src/**/*.cpp";
 

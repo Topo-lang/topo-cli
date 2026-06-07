@@ -14,7 +14,7 @@ void printUsage(const char* argv0) {
     std::cerr << "Usage: " << argv0 << " [options]\n"
               << "\n"
               << "  --project <dir>      Project directory (default: current directory)\n"
-              << "  --language <lang>    Language: cpp, rust, java (default: auto-detect)\n"
+              << "  --language <lang>    Language: cpp, rust, java, python, typescript (default: auto-detect)\n"
               << "  --output <dir>       Output directory for .topo files (default: topo/)\n"
               << "  --dry-run            Print generated .topo to stdout, don't write files\n"
               << "  --verbose            Print extracted symbols\n"
@@ -67,17 +67,37 @@ HostLanguage detectLanguage(const std::string& projectDir) {
     int cppCount = 0, rustCount = 0, javaCount = 0, pythonCount = 0, typescriptCount = 0;
 
     std::error_code ec;
+    // Use the non-throwing (error_code) overloads of increment and the
+    // status queries. skip_permission_denied only suppresses permission
+    // errors at construction/advance; a dangling symlink or a transient FS
+    // error would otherwise throw filesystem_error out of an uncaught path
+    // and terminate the tool. Clear+check ec each step and skip a bad entry
+    // rather than crash — detection should degrade gracefully.
     for (auto it = fs::recursive_directory_iterator(projectDir, fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator();
-         ++it) {
-        if (it->is_directory()) {
+         it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        bool isDir = it->is_directory(ec);
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (isDir) {
             auto dirName = it->path().filename().string();
             if (shouldSkipDir(dirName)) {
                 it.disable_recursion_pending();
                 continue;
             }
         }
-        if (!it->is_regular_file()) continue;
+        bool isFile = it->is_regular_file(ec);
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (!isFile) continue;
 
         auto ext = it->path().extension().string();
         if (ext == ".cpp" || ext == ".cc" || ext == ".cxx")
@@ -125,20 +145,84 @@ std::vector<std::string> collectSourceFiles(const std::string& projectDir, HostL
 
     auto scanRecursive = [&](const fs::path& dir) {
         if (!fs::exists(dir, ec)) return;
+        // Non-throwing increment + status queries (see detectLanguage): a
+        // dangling symlink or transient FS error must not throw out of the
+        // (try/catch-less) caller. Clear+check ec each step; skip on error.
         for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
              it != fs::recursive_directory_iterator();
-             ++it) {
-            if (it->is_directory()) {
+             it.increment(ec)) {
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            bool isDir = it->is_directory(ec);
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            if (isDir) {
                 auto dirName = it->path().filename().string();
                 if (shouldSkipCollectDir(dirName)) {
                     it.disable_recursion_pending();
                     continue;
                 }
             }
-            if (!it->is_regular_file()) continue;
+            bool isFile = it->is_regular_file(ec);
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            if (!isFile) continue;
             auto ext = it->path().extension().string();
             if (matchesExtension(ext, language)) {
-                files.insert(fs::canonical(it->path(), ec).string());
+                // canonical()'s ec-overload returns an EMPTY path on failure
+                // (broken symlink, file removed between enumeration and
+                // canonicalization). Inserting that empty string would feed a
+                // bogus "" path to the symbol extractor — check ec and fall
+                // back to the non-canonical path instead.
+                auto canon = fs::canonical(it->path(), ec);
+                if (ec) {
+                    ec.clear();
+                    files.insert(it->path().string());
+                } else {
+                    files.insert(canon.string());
+                }
+            }
+        }
+    };
+
+    // Scan the project root non-recursively for source files (top-level
+    // sources outside src/). Same ec-safe pattern as scanRecursive: explicit
+    // increment(ec) instead of the range-for's hidden throwing operator++,
+    // is_regular_file(ec), and a checked canonical() so a transient FS error
+    // or broken symlink degrades instead of throwing / inserting "".
+    auto scanRootNonRecursive = [&]() {
+        auto rootDir = fs::path(projectDir);
+        auto it = fs::directory_iterator(rootDir, ec);
+        if (ec) {
+            ec.clear();
+            return;
+        }
+        for (; it != fs::directory_iterator(); it.increment(ec)) {
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            bool isFile = it->is_regular_file(ec);
+            if (ec) {
+                ec.clear();
+                continue;
+            }
+            if (!isFile) continue;
+            auto ext = it->path().extension().string();
+            if (matchesExtension(ext, language)) {
+                auto canon = fs::canonical(it->path(), ec);
+                if (ec) {
+                    ec.clear();
+                    files.insert(it->path().string());
+                } else {
+                    files.insert(canon.string());
+                }
             }
         }
     };
@@ -146,16 +230,8 @@ std::vector<std::string> collectSourceFiles(const std::string& projectDir, HostL
     if (language == HostLanguage::Cpp) {
         // Scan src/ recursively
         scanRecursive(fs::path(projectDir) / "src");
-
         // Scan project root non-recursively
-        auto rootDir = fs::path(projectDir);
-        for (auto& entry : fs::directory_iterator(rootDir, ec)) {
-            if (!entry.is_regular_file()) continue;
-            auto ext = entry.path().extension().string();
-            if (matchesExtension(ext, HostLanguage::Cpp)) {
-                files.insert(fs::canonical(entry.path(), ec).string());
-            }
-        }
+        scanRootNonRecursive();
     } else if (language == HostLanguage::Rust) {
         scanRecursive(fs::path(projectDir) / "src");
     } else if (language == HostLanguage::Java) {
@@ -165,6 +241,14 @@ std::vector<std::string> collectSourceFiles(const std::string& projectDir, HostL
         } else {
             scanRecursive(fs::path(projectDir) / "src");
         }
+    } else if (language == HostLanguage::Python || language == HostLanguage::TypeScript) {
+        // Python/TypeScript projects: scan src/ recursively plus top-level
+        // sources, mirroring the Cpp branch. Without these branches
+        // collectSourceFiles returned an empty vector and `topo init` aborted
+        // with "no source files found" — even though detectLanguage and
+        // matchesExtension already recognise .py/.ts/.tsx.
+        scanRecursive(fs::path(projectDir) / "src");
+        scanRootNonRecursive();
     }
 
     return std::vector<std::string>(files.begin(), files.end());
