@@ -39,6 +39,7 @@
 #include "topo/Platform/Process.h"
 #include "topo/Platform/SharedLibrary.h"
 #include "topo/Platform/TempFile.h"
+#include "topo/Platform/ToolResolution.h"
 #include "topo/Analysis/LifetimeAnalysis.h"
 #include "topo/Sema/ImportResolver.h"
 #include "topo/Sema/SemanticAnalyzer.h"
@@ -499,6 +500,12 @@ int main(int argc, char* argv[]) {
                   << "  Ensure " << toolName << " is built and available.\n";
         return 1;
     }
+
+    // Ensure a relocated backend tool can load libLLVM/libclang from the
+    // resolved (possibly BYO) toolchain: prepend its lib dir to the child's
+    // dynamic-loader search path. A no-op on the build host (the tool's own
+    // recorded paths resolve) and when no toolchain is resolved.
+    topo::platform::ensureLLVMLoaderPathForChildren();
 
     // Invoke the backend tool
     std::cerr << "[4-7] Dispatching to " << toolName << "...\n";
