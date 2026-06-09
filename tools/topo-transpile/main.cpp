@@ -35,6 +35,10 @@ static void printUsage(const char* argv0) {
               << "                      Required for host-source mode; ignored for --from topo\n"
               << "  --adapters <file>   topo-app adapter manifest (JSON); .topo-source mode\n"
               << "                      only. The builtin adapter source is always used\n"
+              << "  --tpm-adapters <pkg>=<file>\n"
+              << "                      tpm package adapter manifest (JSON); repeatable;\n"
+              << "                      .topo-source mode only. Assembled at priority\n"
+              << "                      tpm > topo-app > builtin\n"
               << "  --output <dir>      Output directory (default: ./transpiled/)\n"
               << "  --functions <names> Functions to transpile (comma-separated, default: all)\n"
               << "  --pipeline <name>   Only include functions reachable from the named pipeline\n"
@@ -106,6 +110,7 @@ int main(int argc, char* argv[]) {
     std::string toLang;
     std::string sourcesStr;
     std::string adaptersPath;
+    std::vector<std::string> tpmAdapterSpecs; // raw "<pkg>=<path>" specs
     std::string outputDir = "./transpiled/";
     std::string functionsStr;
     std::string pipelineName;
@@ -149,6 +154,14 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             adaptersPath = argv[++i];
+            continue;
+        }
+        if (arg == "--tpm-adapters") {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --tpm-adapters requires <pkg>=<path>\n";
+                return 1;
+            }
+            tpmAdapterSpecs.emplace_back(argv[++i]);
             continue;
         }
         if (arg == "--output") {
@@ -275,6 +288,27 @@ int main(int argc, char* argv[]) {
     request.targetLanguage = topo::parseHostLanguage(toLang);
     request.adapterManifestPath = adaptersPath;
     request.outputDir = outputDir;
+
+    // tpm adapter manifests: each spec is "<pkg>=<path>" (split on the first
+    // '=', since package names carry '/' but never '='). Validated up front
+    // so a typo'd path fails before the driver runs. Consumed only in
+    // .topo-source mode (the host-source path ignores them, like --adapters).
+    for (const auto& spec : tpmAdapterSpecs) {
+        std::size_t eq = spec.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= spec.size()) {
+            std::cerr << "error: --tpm-adapters expects <pkg>=<path>, got '"
+                      << spec << "'\n";
+            return 1;
+        }
+        std::string pkg = spec.substr(0, eq);
+        std::string path = spec.substr(eq + 1);
+        if (!std::filesystem::exists(path)) {
+            std::cerr << "error: tpm adapter manifest not found: " << path
+                      << "\n";
+            return 1;
+        }
+        request.tpmAdapterManifests.push_back({pkg, path});
+    }
 
     for (const auto& s : splitComma(sourcesStr)) {
         request.sourceFiles.emplace_back(s);

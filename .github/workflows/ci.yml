@@ -82,7 +82,11 @@ jobs:
           # v5: topo-core IncrementalCache::saveManifest now returns bool (was
           # void); tools/topo-build/main.cpp consumes the bool result, so the
           # stale -v4 upstream install no longer compiles — bump to refetch.
-          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v5
+          # v6: topo-core gained the tpm AdapterSource API (TpmAdapterManifestRef
+          # + assembleAdapterRegistry's new tpmManifests param + TranspileRequest
+          # .tpmAdapterManifests), consumed by tools/topo-transpile/main.cpp's
+          # --tpm-adapters; the stale -v5 install lacks the new header API.
+          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v6
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.topo-cache.outputs.cache-hit != 'true'
