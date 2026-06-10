@@ -6,7 +6,7 @@ declaration language toolchain.
 | Tool | Role |
 |---|---|
 | `topo-check` | Verify host code obeys its `.topo` declarations. Zero LLVM dep, suitable for pre-commit. |
-| `topo-build` | Build orchestrator — parses `Topo.toml`, runs frontend analysis, subprocess-dispatches the per-language backend (`topo-build-llvm-cpp`, `topo-build-jvm-java`, …). |
+| `topo-build` | Build orchestrator — parses `Topo.toml`, runs frontend analysis, runs `topo-check` (on by default for every build; `--no-check` / `[build].check = "off"` to skip, with a loud UNVERIFIED warning when an enabled optimization consumes declarations), subprocess-dispatches the per-language backend (`topo-build-llvm-cpp`, `topo-build-jvm-java`, …). |
 | `topo-init` | Generate the initial `Topo.toml` + `.topo` stubs for a project, auto-detecting the host language. |
 | `topo-transpile` | Cross-language source rewriter — host→host, plus `.topo`-source codegen via the AdapterResolver. |
 | `topo-profile` | Spans + sampling trace normalization, including V8 `.cpuprofile` → source-mapped frames. |
