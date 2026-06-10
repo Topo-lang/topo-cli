@@ -14,20 +14,31 @@ env:
   TOPO_CORE_REF: main
   TOPO_LANG_REF: main
   TOPO_V8_REF: main
+  TOPO_LLVM_REF: main
+  TOPO_LANG_CPP_REF: main
+  TOPO_LANG_RUST_REF: main
   TOPO_LANG_JAVA_REF: main
   TOPO_LANG_PYTHON_REF: main
   TOPO_LANG_TYPESCRIPT_REF: main
   # cpp / rust plugin aggregators are gated upstream by TOPO_LANG_<L>_ENABLE_LLVM
-  # and not in their default install set yet; topo-cli auto-detects their
-  # absence and disables those plugins (auto-handled, no CI work needed).
+  # and not in their default install set. build-and-smoke leaves them out
+  # (topo-cli auto-detects their absence and disables those plugins);
+  # integrated-check builds both at LLVM scope so the assembled topo-check
+  # links all five plugins and the integrated checker suite can run.
 
 jobs:
   build-and-smoke:
     # topo-cli is a thin per-language router with no in-tree unit tests by
-    # design — its behavior is verified by the downstream checker / e2e suites
-    # in the topo-lang-* packages (which install the real CLI). So this job is
-    # build + smoke (CLI install + launch), NOT a test job; naming it
-    # "build + test" implied coverage it never had.
+    # design. This job is build + smoke (CLI install + launch + downstream
+    # find_package) on all three platforms, with the default-scope plugin set
+    # (java / python / typescript). Behavioral verification lives in the
+    # integrated-check job below: it assembles all FIVE plugins and runs the
+    # integrated checker suite (topo-core/test/check) against this repo's
+    # TopoCheckRunner — currently the only public CI surface that executes
+    # topo-check behavior end-to-end. The per-language checker-e2e suites in
+    # the topo-lang-* packages have no public CI surface yet; extending
+    # integrated-check to drive them against the same prefix is the intended
+    # follow-up.
     name: build + smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     defaults:
@@ -285,3 +296,423 @@ jobs:
               -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
           cmake --build build
           ./build/smoke
+
+  # ── Integrated checker suite (topo-core/test/check) ──────────────────────
+  # Builds topo-cli with ALL FIVE language plugins and runs the integrated
+  # topo-check E2E suite (CheckRunner orchestration over real fixture
+  # projects) against this repo's TopoCheckRunner. topo-core/test/check is
+  # configured standalone here — its CMakeLists bootstraps from
+  # CMAKE_PREFIX_PATH when it is the top-level source dir, with every
+  # package REQUIRED so a missing dependency fails the configure instead of
+  # self-skipping into a vacuous green.
+  #
+  # Unlike build-and-smoke, the upstream prefix here also carries topo-llvm
+  # core + topo-lang-cpp / topo-lang-rust at LLVM scope, because the
+  # TopoCppPlugin / TopoRustPlugin aggregators only ship when
+  # TOPO_LANG_<L>_ENABLE_LLVM=ON upstream. The LLVM/Clang dev trees must be
+  # present on EVERY run (the lang-cpp package config find_dependency's
+  # LLVM + Clang), mirroring topo-lang-cpp's own verify-llvm job; the
+  # assembled topo prefix is cached, so the LLVM-scope builds themselves are
+  # paid only on cache miss.
+  #
+  # At runtime the suite needs no host language servers: the cpp fixtures
+  # exercise the in-process L1 (regex) extraction path, and the
+  # deep-degradation contract case deliberately guts PATH to prove the
+  # checker refuses to degrade when the language server is absent. The only
+  # expected skip is the opt-in --jobs benchmark (TOPO_BENCH_JOBS unset).
+  #
+  # Windows is excluded for now:
+  #  (1) the check runner's language-server probes go through the reproc
+  #      subprocess transport, which on Windows can hang instead of failing
+  #      fast when the probed tool is absent — the suite's deep-degradation
+  #      contract case depends on a fast-fail probe;
+  #  (2) the cpp/rust LLVM scope is itself deferred on Windows upstream
+  #      (bundled-clang ABI + static-CRT pinning, see topo-lang-cpp CI).
+  #
+  # The per-language checker-e2e suites (topo-lang-*/test) are the natural
+  # next addition: configure each repo's suite against this same prefix and
+  # extend the assert step's binary list.
+  integrated-check:
+    name: integrated check suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build openjdk-17-jdk python3 python3-pip nodejs npm
+
+      - name: Install build deps + LLVM (macos)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja openjdk@17 python@3.12 node || true
+          brew install llvm@22
+
+      - name: Point find_package(LLVM/Clang) at brew llvm@22 (macos)
+        if: runner.os == 'macOS'
+        run: |
+          BREW_LLVM="$(brew --prefix llvm@22)"
+          echo "LLVM_DIR=${BREW_LLVM}/lib/cmake/llvm"   >> "$GITHUB_ENV"
+          echo "Clang_DIR=${BREW_LLVM}/lib/cmake/clang" >> "$GITHUB_ENV"
+
+      - name: Acquire bundled LLVM (linux)
+        if: runner.os == 'Linux'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LLVM_REF}" \
+              https://github.com/topo-lang/topo-llvm.git "${RUNNER_TEMP}/topo-llvm-src"
+          (cd "${RUNNER_TEMP}/topo-llvm-src" && bash scripts/setup-llvm.sh)
+          LLVM_ROOT="${RUNNER_TEMP}/topo-llvm-src/llvm-dev"
+          echo "LLVM_DIR=${LLVM_ROOT}/lib/cmake/llvm"   >> "$GITHUB_ENV"
+          echo "Clang_DIR=${LLVM_ROOT}/lib/cmake/clang" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Export GHA cache env (for vcpkg x-gha backend)
+        uses: actions/github-script@v8
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: "56bb2411609227288b70117ead2c47585ba07713"
+
+      - name: Cache upstream topo install (all-plugin prefix)
+        id: topo-check-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/topo-install
+          # Distinct from build-and-smoke's topo-cli-deps-* cache: this
+          # prefix additionally carries topo-llvm core + topo-lang-cpp /
+          # topo-lang-rust at LLVM scope (TopoCppPlugin / TopoRustPlugin).
+          # Keyed on the literal ref "main" for each upstream, so when an
+          # upstream API change breaks the cached install (or the suite in
+          # topo-core/test/check starts needing newer upstream behavior),
+          # bump the -vN suffix to force a rebuild — same convention as the
+          # build-and-smoke key above.
+          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v1
+
+      # liblldb in the bundled LLVM (linked by topo-lang-cpp's
+      # topo-debug-cpp at LLVM scope) needs libpython3.11, absent on
+      # ubuntu-noble — pull from deadsnakes. Only the cache-miss build
+      # links it; nothing in the suite loads liblldb at runtime.
+      - name: Install libpython3.11 for liblldb (linux)
+        if: runner.os == 'Linux' && steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y -qq software-properties-common
+          sudo add-apt-repository -y ppa:deadsnakes/ppa
+          sudo apt-get update -qq && sudo apt-get install -y -qq libpython3.11
+
+      # topo-lang-rust's LLVM scope builds topo-extract-rust via cargo.
+      # Runner images usually ship Rust, but that is not guaranteed across
+      # image updates — bootstrap a minimal toolchain when absent.
+      - name: Ensure Rust toolchain (topo-extract-rust build)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+          fi
+          [ -d "${HOME}/.cargo/bin" ] && echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH" || true
+
+      - name: Build & install topo-core (zero-LLVM, lang-less)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_CORE_REF}" \
+              https://github.com/topo-lang/topo-core.git \
+              "${RUNNER_TEMP}/topo-core-src"
+          cmake -S "${RUNNER_TEMP}/topo-core-src" \
+                -B "${RUNNER_TEMP}/topo-core-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_ENABLE_LLVM=OFF \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
+
+      - name: Build & install topo-lang
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_REF}" \
+              https://github.com/topo-lang/topo-lang.git \
+              "${RUNNER_TEMP}/topo-lang-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-src" \
+                -B "${RUNNER_TEMP}/topo-lang-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build "${RUNNER_TEMP}/topo-lang-build" --target install
+
+      - name: Re-install topo-core (with-lang)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S "${RUNNER_TEMP}/topo-core-src" \
+                -B "${RUNNER_TEMP}/topo-core-build" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build "${RUNNER_TEMP}/topo-core-build" --target install
+
+      - name: Build & install topo-v8
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_V8_REF}" \
+              https://github.com/topo-lang/topo-v8.git \
+              "${RUNNER_TEMP}/topo-v8-src"
+          cmake -S "${RUNNER_TEMP}/topo-v8-src" \
+                -B "${RUNNER_TEMP}/topo-v8-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+          cmake --build "${RUNNER_TEMP}/topo-v8-build" --target install
+
+      # topo-llvm's C-ABI runtime libs #include topo-lang-cpp's
+      # runtime/include/topo/*.h, so the default-scope (zero-LLVM) lang-cpp
+      # install must land in the prefix BEFORE the topo-llvm core build —
+      # mirrors topo-lang-cpp's own verify-llvm job.
+      - name: Build & install topo-lang-cpp (default scope — runtime headers)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_CPP_REF}" \
+              https://github.com/topo-lang/topo-lang-cpp.git \
+              "${RUNNER_TEMP}/topo-lang-cpp-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-cpp-src" \
+                -B "${RUNNER_TEMP}/topo-lang-cpp-default-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build "${RUNNER_TEMP}/topo-lang-cpp-default-build" --target install
+
+      - name: Build & install topo-llvm core (tools OFF, jit-engine ON)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          SRC="${RUNNER_TEMP}/topo-llvm-src"
+          [ -d "$SRC" ] || git clone --depth 1 --branch "${TOPO_LLVM_REF}" \
+              https://github.com/topo-lang/topo-llvm.git "$SRC"
+          LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
+          cmake -S "$SRC" -B "${RUNNER_TEMP}/topo-llvm-core-build" -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${LLVM_ROOT}" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LLVM_BUILD_TOOLS=OFF -DTOPO_LLVM_BUILD_TESTS=OFF \
+                -DTOPO_LLVM_BUILD_JIT_ENGINE=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build "${RUNNER_TEMP}/topo-llvm-core-build" --target install
+
+      # rust BEFORE the lang-cpp LLVM-scope install: topo-debug-rust is
+      # deferred upstream and self-skips while topo::lang-cpp::TopoDebugAdapter
+      # is not yet importable, keeping this build lean.
+      - name: Build & install topo-lang-rust (LLVM scope — TopoRustPlugin)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_RUST_REF}" \
+              https://github.com/topo-lang/topo-lang-rust.git \
+              "${RUNNER_TEMP}/topo-lang-rust-src"
+          LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
+          cmake -S "${RUNNER_TEMP}/topo-lang-rust-src" \
+                -B "${RUNNER_TEMP}/topo-lang-rust-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${LLVM_ROOT}" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_RUST_ENABLE_LLVM=ON \
+                -DTOPO_LANG_RUST_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-lang-rust-build" --target install
+
+      - name: Build & install topo-lang-cpp (LLVM scope — TopoCppPlugin)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
+          cmake -S "${RUNNER_TEMP}/topo-lang-cpp-src" \
+                -B "${RUNNER_TEMP}/topo-lang-cpp-llvm-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${LLVM_ROOT}" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_CPP_ENABLE_LLVM=ON \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build "${RUNNER_TEMP}/topo-lang-cpp-llvm-build" --target install
+
+      - name: Build & install topo-lang-java
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_JAVA_REF}" \
+              https://github.com/topo-lang/topo-lang-java.git \
+              "${RUNNER_TEMP}/topo-lang-java-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-java-src" \
+                -B "${RUNNER_TEMP}/topo-lang-java-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_JAVA_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-lang-java-build" --target install
+
+      - name: Build & install topo-lang-python
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_PYTHON_REF}" \
+              https://github.com/topo-lang/topo-lang-python.git \
+              "${RUNNER_TEMP}/topo-lang-python-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-python-src" \
+                -B "${RUNNER_TEMP}/topo-lang-python-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_PYTHON_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-lang-python-build" --target install
+
+      - name: Build & install topo-lang-typescript
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_TYPESCRIPT_REF}" \
+              https://github.com/topo-lang/topo-lang-typescript.git \
+              "${RUNNER_TEMP}/topo-lang-typescript-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-typescript-src" \
+                -B "${RUNNER_TEMP}/topo-lang-typescript-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_TYPESCRIPT_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-lang-typescript-build" --target install
+
+      - name: Configure & build topo-cli (all five plugins)
+        run: |
+          LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
+          cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${LLVM_ROOT}" \
+              -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build
+
+      # Early tripwire: topo-cli auto-detects plugin availability and
+      # silently flips a missing one OFF — fine for build-and-smoke, fatal
+      # to the premise of THIS job. Fail here with a clear message rather
+      # than at suite configure time.
+      - name: Assert all five plugins resolved
+        run: |
+          n=$(grep -cE '^TOPO_CLI_ENABLE_(CPP|RUST|JAVA|PYTHON|TYPESCRIPT)_PLUGIN:BOOL=ON$' build/CMakeCache.txt || true)
+          echo "plugin aggregators resolved ON: ${n}/5"
+          if [ "${n}" -ne 5 ]; then
+            grep -E '^TOPO_CLI_ENABLE_[A-Z]+_PLUGIN:BOOL=' build/CMakeCache.txt || true
+            echo "::error::expected all five language plugins to resolve — the integrated suite premise does not hold"
+            exit 1
+          fi
+
+      - name: Install topo-cli
+        run: cmake --install build --prefix "${RUNNER_TEMP}/cli-install"
+
+      # On a cache hit the upstream clone steps were skipped; the suite
+      # sources are needed regardless. Standing caveat of the literal-"main"
+      # cache key: the cached prefix can lag the freshly cloned test
+      # sources — if the suite starts requiring newer upstream behavior,
+      # bump the cache key -vN suffix.
+      - name: Fetch topo-core test sources
+        run: |
+          [ -d "${RUNNER_TEMP}/topo-core-src" ] || git clone --depth 1 --branch "${TOPO_CORE_REF}" \
+              https://github.com/topo-lang/topo-core.git "${RUNNER_TEMP}/topo-core-src"
+
+      - name: Configure & build the integrated checker suite (standalone topo-core/test/check)
+        run: |
+          LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
+          cmake -S "${RUNNER_TEMP}/topo-core-src/test/check" \
+                -B "${RUNNER_TEMP}/check-suite-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/cli-install;${RUNNER_TEMP}/topo-install;${LLVM_ROOT}" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+          cmake --build "${RUNNER_TEMP}/check-suite-build"
+
+      - name: Run the integrated checker suite
+        run: |
+          ctest --test-dir "${RUNNER_TEMP}/check-suite-build" \
+                --output-on-failure --timeout 180 --no-tests=error
+
+      - name: Assert the suite RAN — all-skip is a failure (skip != pass)
+        # ctest can render a GTEST_SKIP'd case as Passed, so "ctest green"
+        # could still mean "everything skipped". Re-run the suite binary and
+        # assert from gtest's own summary that the always-on cases actually
+        # executed (same mechanism as topo-lsp's live-bridge assertion).
+        # Today's suite: 8 always-on cases + 1 opt-in benchmark skip
+        # (CheckRunner.JobsBenchmark_100Files_ParallelSpeedup, TOPO_BENCH_JOBS
+        # unset). When per-language suites join this job, extend the binary
+        # list below.
+        run: |
+          # set +e: handle errors explicitly (GHA bash runs with -e; a grep
+          # no-match inside $() would otherwise abort the step silently).
+          set +e
+          ALLOWED_SKIP='CheckRunner.JobsBenchmark_100Files_ParallelSpeedup'
+          MIN_PASSED=8
+
+          # Self-test the parser + detector on a canned all-skip transcript
+          # first, so a parsing regression cannot silently neutralize the
+          # assertion below.
+          selftest=$(printf '%s\n' \
+            '[  PASSED  ] 0 tests.' \
+            '[  SKIPPED ] 9 tests, listed below:' \
+            '[  SKIPPED ] CheckRunner.AllChecksOnPassProject')
+          st_passed=$(printf '%s\n' "${selftest}" | grep -oE '\[  PASSED  \] [0-9]+ test' | grep -oE '[0-9]+' | tail -1)
+          st_unexpected=$(printf '%s\n' "${selftest}" | grep -E '^\[  SKIPPED \] [A-Za-z_]' | grep -v "${ALLOWED_SKIP}")
+          if [ "${st_passed}" != "0" ] || [ -z "${st_unexpected}" ]; then
+            echo "::error::guard self-test failed (passed='${st_passed}', detector='${st_unexpected}') — fix the parser; the assertion cannot be trusted"
+            exit 1
+          fi
+          echo "guard self-test OK (canned all-skip transcript would be rejected)"
+
+          fail=0
+          for t in topo-check-tests; do
+            exe=$(find "${RUNNER_TEMP}/check-suite-build" -type f -name "${t}" 2>/dev/null | head -1)
+            if [ -z "${exe}" ]; then
+              echo "::error::${t}: binary not found — the suite was gated out at configure time (vacuous green)"; fail=1; continue
+            fi
+            out=$("${exe}" --gtest_color=no 2>&1); rc=$?
+            printf '%s\n' "${out}" | tail -8
+            passed=$(printf '%s\n' "${out}" | grep -oE '\[  PASSED  \] [0-9]+ test' | grep -oE '[0-9]+' | tail -1)
+            skipped=$(printf '%s\n' "${out}" | grep -oE '\[  SKIPPED \] [0-9]+ test' | grep -oE '[0-9]+' | tail -1)
+            [ -z "${passed}" ] && passed=0
+            [ -z "${skipped}" ] && skipped=0
+            echo "${t}: ${passed} PASSED, ${skipped} SKIPPED (exit ${rc})"
+            if [ "${rc}" -ne 0 ]; then
+              echo "::error::${t}: exited ${rc}"; fail=1
+            fi
+            if [ "${passed}" -lt "${MIN_PASSED}" ]; then
+              echo "::error::${t}: expected >= ${MIN_PASSED} non-skipped cases, got ${passed} — the suite degraded to skips (skip != pass)"; fail=1
+            fi
+            unexpected=$(printf '%s\n' "${out}" | grep -E '^\[  SKIPPED \] [A-Za-z_]' | grep -v "${ALLOWED_SKIP}")
+            if [ -n "${unexpected}" ]; then
+              echo "::error::${t}: unexpected skipped cases (only the opt-in --jobs benchmark may skip):"
+              printf '%s\n' "${unexpected}"; fail=1
+            fi
+          done
+          [ "${fail}" -eq 0 ]
