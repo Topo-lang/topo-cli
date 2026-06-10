@@ -377,15 +377,29 @@ int main(int argc, char* argv[]) {
 
     // ================================================================
     // Step 3: Run topo-check (per resolved check mode: CLI --check/--no-check
-    // > [build].check on/off > auto, where auto checks exactly when an
-    // enabled optimization consumes .topo declarations)
+    // > [build].check on/off > auto, where auto checks EVERY build — the
+    // incremental check cache keeps no-change rebuilds near zero cost)
     // ================================================================
-    if (cfg.shouldRunCheck()) {
+    // Mixed C++/Rust projects have no registered checker (the per-language
+    // plugin registry covers cpp/rust/java/python/typescript; the mixed
+    // driver spans two of them), so the default-on check would fail every
+    // mixed build with "no language plugin registered". Skip with an
+    // explicit note instead — but honor an explicit --check /
+    // [build].check="on" request by letting topo-check report the gap
+    // loudly itself.
+    bool checkExplicitlyRequested =
+        (cfg.checkCliOverride.has_value() && *cfg.checkCliOverride) ||
+        cfg.checkMode == CheckMode::On;
+    if (cfg.shouldRunCheck() && cfg.language == topo::HostLanguage::Mixed &&
+        !checkExplicitlyRequested) {
+        std::cerr << "note: skipping topo-check — no checker is registered for mixed\n"
+                  << "  C++/Rust projects yet (pass --check to force the attempt)\n";
+    } else if (cfg.shouldRunCheck()) {
         std::string checkTool = findBackendTool("topo-check");
         if (checkTool.empty()) {
-            std::cerr << "error: topo-check not found (required by --check)\n"
+            std::cerr << "error: topo-check not found (checks run on every build by default)\n"
                       << "  Searched: executable directory, PATH\n"
-                      << "  Ensure topo-check is built and available.\n";
+                      << "  Ensure topo-check is built and available, or pass --no-check.\n";
             return 1;
         }
 
@@ -401,9 +415,13 @@ int main(int argc, char* argv[]) {
         std::cerr << "      All checks passed\n";
     } else if (cfg.consumesDeclarationsForOptimization()) {
         // Only reachable through an explicit opt-out: under the default
-        // [build].check=auto, an enabled declaration-consuming optimization
-        // turns checking on. Warn loudly — the optimization license rests on
-        // checked declarations, and this build proceeds without that license.
+        // [build].check=auto every build checks, so shouldRunCheck() is false
+        // only via --no-check / [build].check="off". Warn loudly when that
+        // opt-out coincides with an enabled declaration-consuming
+        // optimization — the optimization license rests on checked
+        // declarations, and this build proceeds without that license. (A
+        // plain-build opt-out skips nothing the optimizer relies on and
+        // stays quiet.)
         const char* optOut = cfg.checkCliOverride.has_value()
                                  ? "--no-check"
                                  : "[build].check = \"off\"";
