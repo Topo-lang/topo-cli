@@ -2,6 +2,11 @@
 #include "TopoGenerator.h"
 #include "topo/Check/LanguageAnalysisProvider.h"
 #include "topo/Check/SymbolExtractor.h"
+// Direct include — LanguagePlugin.h only forward-declares the provider, and
+// the lldb-formatter block below calls through it. Relying on a transitive
+// completion from a language-plugin package header makes this TU compile
+// only when plugin packages happen to be on the prefix.
+#include "topo/Lang/InitTemplateProvider.h"
 #include "topo/Lang/LanguagePlugin.h"
 
 #if defined(TOPO_CLI_WITH_CPP_PLUGIN)
