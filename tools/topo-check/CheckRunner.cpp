@@ -49,8 +49,11 @@ namespace topo {
 namespace {
 
 // On-disk version for `.topo-check-cache`. Bumped to 3 when `deep` was added
-// to the cache key so older (mode-blind) caches invalidate on read.
-constexpr int CHECK_CACHE_VERSION = 3;
+// to the cache key so older (mode-blind) caches invalidate on read. Bumped to
+// 4 when requested-deep-but-unavailable became a hard error: before that, a
+// degraded L1-grade run could be stamped `deep: true, result: 0`, so any
+// version-3 deep verdict is untrustworthy and must re-run.
+constexpr int CHECK_CACHE_VERSION = 4;
 
 // Small internal thread pool. File-level workers pull tasks from a FIFO queue.
 // Lifetime scoped to the `parallelMap` helper below — workers exit when all
@@ -785,6 +788,20 @@ check::CheckResult CheckRunner::runContainment() {
             for (auto& d : deepResult->diagnostics) {
                 result.addDiagnostic(std::move(d));
             }
+            // The L1 pass below still runs (its findings stay useful), but a
+            // run that was asked for L2 depth must not PASS at a silently
+            // shallower grade — the no-silent-degradation principle grades a
+            // disabled safety check as Error. This diagnostic forces the
+            // final verdict non-zero while keeping every L1 finding visible.
+            check::CheckDiagnostic deepUnavailable;
+            deepUnavailable.severity = check::Severity::Error;
+            deepUnavailable.check = "containment";
+            deepUnavailable.message =
+                "deep (L2) containment analysis was requested (--deep) but its "
+                "infrastructure is unavailable — the result above is L1-grade "
+                "only; fix the L2 setup (language server / compile database) or "
+                "rerun without --deep";
+            result.addDiagnostic(std::move(deepUnavailable));
         }
         // Fall through to L1 if deep analysis not supported or unavailable
     }
@@ -1171,8 +1188,18 @@ int CheckRunner::run() {
             if (config_.verbose) {
                 std::cerr << "topo-check: LSP initialized\n";
             }
-        } else if (config_.verbose) {
-            std::cerr << "topo-check: LSP unavailable, using regex extractors\n";
+        } else {
+            // --deep promised L2 depth and the language server is the L2
+            // engine. Substituting regex extractors here would let a PASS
+            // mean something strictly shallower than what was requested —
+            // the no-silent-degradation principle grades a disabled safety
+            // check as Error: abort, non-zero. Users who want the L1-grade
+            // result can rerun without --deep.
+            std::cerr << "topo-check: error: --deep requested but the language server "
+                         "is unavailable — deep (L2) analysis cannot run.\n"
+                         "  Install/start the language server for this project's "
+                         "language, or rerun without --deep for L1-only checks.\n";
+            return 2;
         }
     }
 
