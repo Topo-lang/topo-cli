@@ -376,7 +376,9 @@ int main(int argc, char* argv[]) {
     }
 
     // ================================================================
-    // Step 3: Run topo-check (if --check)
+    // Step 3: Run topo-check (per resolved check mode: CLI --check/--no-check
+    // > [build].check on/off > auto, where auto checks exactly when an
+    // enabled optimization consumes .topo declarations)
     // ================================================================
     if (cfg.shouldRunCheck()) {
         std::string checkTool = findBackendTool("topo-check");
@@ -397,6 +399,20 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cerr << "      All checks passed\n";
+    } else if (cfg.consumesDeclarationsForOptimization()) {
+        // Only reachable through an explicit opt-out: under the default
+        // [build].check=auto, an enabled declaration-consuming optimization
+        // turns checking on. Warn loudly — the optimization license rests on
+        // checked declarations, and this build proceeds without that license.
+        const char* optOut = cfg.checkCliOverride.has_value()
+                                 ? "--no-check"
+                                 : "[build].check = \"off\"";
+        std::cerr << "warning: " << optOut << " skips topo-check, but an enabled optimization\n"
+                  << "  (parallel / loop-parallel / lifetime / forced pipeline) consumes .topo\n"
+                  << "  declarations that now enter the build UNVERIFIED. A wrong declaration\n"
+                  << "  can make the optimized program unsafe (data race, use-after-free).\n"
+                  << "  Remove the opt-out, or run topo-check separately before relying on\n"
+                  << "  this binary.\n";
     }
 
     // ================================================================
