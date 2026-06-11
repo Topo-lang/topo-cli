@@ -6,9 +6,8 @@
 #include "CheckRunner.h"
 
 // Plugin headers are conditionally included so a build with a subset
-// of language plugins (e.g. when topo-lang-cpp's LLVM scope is gated
-// OFF upstream and TopoCppPlugin is unavailable) still produces a
-// valid topo-check binary.
+// of language plugins (an upstream language package absent from the
+// prefix) still produces a valid topo-check binary.
 #if defined(TOPO_CLI_WITH_CPP_PLUGIN)
 #include "CppPlugin.h"
 #endif

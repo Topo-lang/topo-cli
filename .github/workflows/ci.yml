@@ -11,34 +11,43 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  TOPO_CORE_REF: main
+  # topo-core / topo-lang-cpp / topo-lang-rust are dev-pinned while the
+  # current fix batch rides those repos' dev branches (topo-core:
+  # BuildConfig::cppFlags + the mixed checker fixtures the integrated
+  # suite consumes; lang-cpp/rust: plugin aggregators ungated into the
+  # default install set). Flip back to main at promotion.
+  TOPO_CORE_REF: dev
   TOPO_LANG_REF: main
   TOPO_V8_REF: main
   TOPO_LLVM_REF: main
-  TOPO_LANG_CPP_REF: main
-  TOPO_LANG_RUST_REF: main
+  TOPO_JVM_REF: main
+  TOPO_LANG_CPP_REF: dev
+  TOPO_LANG_RUST_REF: dev
   TOPO_LANG_JAVA_REF: main
   TOPO_LANG_PYTHON_REF: main
   TOPO_LANG_TYPESCRIPT_REF: main
-  # cpp / rust plugin aggregators are gated upstream by TOPO_LANG_<L>_ENABLE_LLVM
-  # and not in their default install set. build-and-smoke leaves them out
-  # (topo-cli auto-detects their absence and disables those plugins);
-  # integrated-check builds both at LLVM scope so the assembled topo-check
-  # links all five plugins and the integrated checker suite can run.
+  # The cpp / rust plugin aggregators ship in every upstream install scope
+  # (their closure is zero-LLVM), so build-and-smoke installs both at
+  # default scope and all five plugins resolve on all three platforms.
+  # integrated-check additionally builds the genuinely LLVM-gated pieces
+  # (CppDriver / RustDriver and the topo-llvm backend tools) that the
+  # init → build smoke dispatches to.
 
 jobs:
   build-and-smoke:
     # topo-cli is a thin per-language router with no in-tree unit tests by
     # design. This job is build + smoke (CLI install + launch + downstream
-    # find_package) on all three platforms, with the default-scope plugin set
-    # (java / python / typescript). Behavioral verification lives in the
-    # integrated-check job below: it assembles all FIVE plugins and runs the
-    # integrated checker suite (topo-core/test/check) against this repo's
-    # TopoCheckRunner — currently the only public CI surface that executes
-    # topo-check behavior end-to-end. The per-language checker-e2e suites in
-    # the topo-lang-* packages have no public CI surface yet; extending
-    # integrated-check to drive them against the same prefix is the intended
-    # follow-up.
+    # find_package + init→check scaffold smoke) on all three platforms,
+    # with the full default-scope plugin set — all five language plugins,
+    # now that the cpp/rust aggregators ship at default scope upstream.
+    # Behavioral verification lives in the integrated-check job below: it
+    # adds the LLVM/JVM backend tools and runs the integrated checker
+    # suite (topo-core/test/check) plus the full init→check→build smoke
+    # against this repo's TopoCheckRunner — currently the only public CI
+    # surface that executes topo-check behavior end-to-end. The
+    # per-language checker-e2e suites in the topo-lang-* packages have no
+    # public CI surface yet; extending integrated-check to drive them
+    # against the same prefix is the intended follow-up.
     name: build + smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     defaults:
@@ -88,7 +97,7 @@ jobs:
           path: ${{ runner.temp }}/topo-install
           # v4: topo-core gained the BYO LLVM toolchain resolver
           # (ensureLLVMLoaderPathForChildren, called by tools/topo-build/main.cpp);
-          # the upstream cache is keyed on the literal ref "main", so bump to
+          # the upstream cache is keyed on the literal upstream refs, so bump to
           # force a fresh topo-core rebuild that carries the new API.
           # v5: topo-core IncrementalCache::saveManifest now returns bool (was
           # void); tools/topo-build/main.cpp consumes the bool result, so the
@@ -100,7 +109,11 @@ jobs:
           # v7: topo-core BuildConfig gained consumesDeclarationsForOptimization()
           # (auto-check-when-optimizing), consumed by tools/topo-build/main.cpp's
           # check=off warning; the stale -v6 install lacks the new method.
-          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v8
+          # v9: the prefix gains default-scope topo-lang-cpp / topo-lang-rust
+          # (plugin aggregators ungated upstream) and topo-core BuildConfig
+          # gained cppFlags, consumed by tools/topo-build/Config.cpp — the
+          # stale -v8 prefix lacks both.
+          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v9
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.topo-cache.outputs.cache-hit != 'true'
@@ -154,6 +167,42 @@ jobs:
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
           cmake --build "${RUNNER_TEMP}/topo-v8-build" --target install
+
+      # Default scope is all the cpp/rust plugins need: the aggregators'
+      # closure is zero-LLVM, so no LLVM dist or extra flags here. The
+      # LLVM-gated pieces (CppDriver / RustDriver, debug adapters,
+      # LibTooling extractor) stay out of this job — integrated-check
+      # carries them for the build half of the smoke.
+      - name: Build & install topo-lang-cpp (default scope)
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_CPP_REF}" \
+              https://github.com/topo-lang/topo-lang-cpp.git \
+              "${RUNNER_TEMP}/topo-lang-cpp-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-cpp-src" \
+                -B "${RUNNER_TEMP}/topo-lang-cpp-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+          cmake --build "${RUNNER_TEMP}/topo-lang-cpp-build" --target install
+
+      - name: Build & install topo-lang-rust (default scope)
+        if: steps.topo-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_LANG_RUST_REF}" \
+              https://github.com/topo-lang/topo-lang-rust.git \
+              "${RUNNER_TEMP}/topo-lang-rust-src"
+          cmake -S "${RUNNER_TEMP}/topo-lang-rust-src" \
+                -B "${RUNNER_TEMP}/topo-lang-rust-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_LANG_RUST_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-lang-rust-build" --target install
 
       - name: Build & install topo-lang-java
         if: steps.topo-cache.outputs.cache-hit != 'true'
@@ -212,6 +261,20 @@ jobs:
 
       - name: Build
         run: cmake --build build
+
+      # topo-cli auto-detects plugin availability and silently flips a
+      # missing one OFF. With the cpp/rust aggregators in the default
+      # install set, all five must resolve here too — a 3/5 result means
+      # the upstream prefix regressed (or the cache key went stale).
+      - name: Assert all five plugins resolved
+        run: |
+          n=$(grep -cE '^TOPO_CLI_ENABLE_(CPP|RUST|JAVA|PYTHON|TYPESCRIPT)_PLUGIN:BOOL=ON$' build/CMakeCache.txt || true)
+          echo "plugin aggregators resolved ON: ${n}/5"
+          if [ "${n}" -ne 5 ]; then
+            grep -E '^TOPO_CLI_ENABLE_[A-Z]+_PLUGIN:BOOL=' build/CMakeCache.txt || true
+            echo "::error::expected all five language plugins to resolve in the default scope"
+            exit 1
+          fi
 
       - name: Install topo-cli
         run: cmake --install build --prefix "${RUNNER_TEMP}/cli-install"
@@ -297,23 +360,41 @@ jobs:
           cmake --build build
           ./build/smoke
 
-  # ── Integrated checker suite (topo-core/test/check) ──────────────────────
-  # Builds topo-cli with ALL FIVE language plugins and runs the integrated
+      # Scaffold smoke, check half only: init → topo-check exit 0 for the
+      # languages whose generated projects need no backend toolchain to
+      # verify. This is the only Windows surface for the init → check
+      # contract (integrated-check excludes Windows); the build half runs
+      # there with all backend tools present.
+      - name: Init smoke (java / python / typescript) — init → check
+        run: |
+          CLI_BIN="${RUNNER_TEMP}/cli-install/bin"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            CLI_BIN="$(cygpath -u "${CLI_BIN}")"
+          fi
+          export PATH="${CLI_BIN}:${PATH}"
+          TOPO_INIT_SMOKE_CHECK_ONLY=1 sh test/smoke/run-init-smoke.sh java python typescript
+
+  # ── Integrated checker suite (topo-core/test/check) + full init smoke ────
+  # Builds topo-cli with ALL FIVE language plugins, runs the integrated
   # topo-check E2E suite (CheckRunner orchestration over real fixture
-  # projects) against this repo's TopoCheckRunner. topo-core/test/check is
-  # configured standalone here — its CMakeLists bootstraps from
-  # CMAKE_PREFIX_PATH when it is the top-level source dir, with every
-  # package REQUIRED so a missing dependency fails the configure instead of
-  # self-skipping into a vacuous green.
+  # projects) against this repo's TopoCheckRunner, then runs the
+  # init → check → build scaffold smoke for all five languages.
+  # topo-core/test/check is configured standalone here — its CMakeLists
+  # bootstraps from CMAKE_PREFIX_PATH when it is the top-level source dir,
+  # with every package REQUIRED so a missing dependency fails the configure
+  # instead of self-skipping into a vacuous green.
   #
-  # Unlike build-and-smoke, the upstream prefix here also carries topo-llvm
-  # core + topo-lang-cpp / topo-lang-rust at LLVM scope, because the
-  # TopoCppPlugin / TopoRustPlugin aggregators only ship when
-  # TOPO_LANG_<L>_ENABLE_LLVM=ON upstream. The LLVM/Clang dev trees must be
-  # present on EVERY run (the lang-cpp package config find_dependency's
-  # LLVM + Clang), mirroring topo-lang-cpp's own verify-llvm job; the
-  # assembled topo prefix is cached, so the LLVM-scope builds themselves are
-  # paid only on cache miss.
+  # The plugin aggregators ship at default scope upstream, so they need no
+  # LLVM. The LLVM surface this job keeps exists for the BACKEND TOOLS the
+  # smoke's build half dispatches to: topo-build-llvm-{cpp,rust} link the
+  # LLVM-gated TopoCppDriver / TopoRustDriver, so the prefix carries
+  # topo-lang-cpp / topo-lang-rust at LLVM scope plus topo-llvm with tools
+  # ON (bootstrap order: llvm core → lang LLVM scope → llvm tools), and
+  # topo-jvm contributes topo-build-jvm-java. The LLVM/Clang dev trees must
+  # be present on EVERY run (the installed lang-cpp package config
+  # find_dependency's LLVM + Clang at its recorded ENABLE_LLVM=ON scope);
+  # the assembled topo prefix is cached, so the builds themselves are paid
+  # only on cache miss.
   #
   # At runtime the suite needs no host language servers: the cpp fixtures
   # exercise the in-process L1 (regex) extraction path, and the
@@ -326,8 +407,10 @@ jobs:
   #      subprocess transport, which on Windows can hang instead of failing
   #      fast when the probed tool is absent — the suite's deep-degradation
   #      contract case depends on a fast-fail probe;
-  #  (2) the cpp/rust LLVM scope is itself deferred on Windows upstream
-  #      (bundled-clang ABI + static-CRT pinning, see topo-lang-cpp CI).
+  #  (2) the LLVM scope feeding the backend tools (CppDriver / RustDriver)
+  #      is itself deferred on Windows upstream (bundled-clang ABI +
+  #      static-CRT pinning, see topo-lang-cpp CI). The init → check half
+  #      gets its Windows coverage in build-and-smoke instead.
   #
   # The per-language checker-e2e suites (topo-lang-*/test) are the natural
   # next addition: configure each repo's suite against this same prefix and
@@ -374,11 +457,14 @@ jobs:
           echo "LLVM_DIR=${LLVM_ROOT}/lib/cmake/llvm"   >> "$GITHUB_ENV"
           echo "Clang_DIR=${LLVM_ROOT}/lib/cmake/clang" >> "$GITHUB_ENV"
 
-      - name: Set up JDK 17
+      # JDK 21 (not 17): the java init→build smoke runs topo-build-jvm-java,
+      # which executes topo-transform.jar — compiled to JDK 21 class files
+      # by its Gradle toolchain — so the runtime java must be >= 21.
+      - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - name: Export GHA cache env (for vcpkg x-gha backend)
         uses: actions/github-script@v8
@@ -399,14 +485,19 @@ jobs:
         with:
           path: ${{ runner.temp }}/topo-install
           # Distinct from build-and-smoke's topo-cli-deps-* cache: this
-          # prefix additionally carries topo-llvm core + topo-lang-cpp /
-          # topo-lang-rust at LLVM scope (TopoCppPlugin / TopoRustPlugin).
-          # Keyed on the literal ref "main" for each upstream, so when an
-          # upstream API change breaks the cached install (or the suite in
+          # prefix additionally carries topo-llvm (backend tools ON) +
+          # topo-lang-cpp / topo-lang-rust at LLVM scope (CppDriver /
+          # RustDriver for those tools) + topo-jvm (topo-build-jvm-java).
+          # Keyed on the literal upstream refs, so when an upstream API
+          # change breaks the cached install (or the suite in
           # topo-core/test/check starts needing newer upstream behavior),
           # bump the -vN suffix to force a rebuild — same convention as the
           # build-and-smoke key above.
-          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v2
+          # v3: prefix contents changed — topo-llvm backend tools +
+          # topo-jvm joined for the init→build smoke, and the cached
+          # pre-ungate lang-cpp/rust installs lack the default-scope
+          # plugin aggregators.
+          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v3
 
       # liblldb in the bundled LLVM (linked by topo-lang-cpp's
       # topo-debug-cpp at LLVM scope) needs libpython3.11, absent on
@@ -419,11 +510,13 @@ jobs:
           sudo add-apt-repository -y ppa:deadsnakes/ppa
           sudo apt-get update -qq && sudo apt-get install -y -qq libpython3.11
 
-      # topo-lang-rust's LLVM scope builds topo-extract-rust via cargo.
-      # Runner images usually ship Rust, but that is not guaranteed across
-      # image updates — bootstrap a minimal toolchain when absent.
-      - name: Ensure Rust toolchain (topo-extract-rust build)
-        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+      # cargo is needed on EVERY run, not just cache-miss builds: the rust
+      # leg of the init→build smoke compiles its scaffolded crate at smoke
+      # runtime (and the cache-miss lang-rust LLVM scope builds
+      # topo-extract-rust via cargo). Runner images usually ship Rust, but
+      # that is not guaranteed across image updates — bootstrap a minimal
+      # toolchain when absent.
+      - name: Ensure Rust toolchain (smoke runtime + extractor build)
         run: |
           if ! command -v cargo >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -523,10 +616,13 @@ jobs:
                 -DTOPO_LLVM_BUILD_JIT_ENGINE=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
           cmake --build "${RUNNER_TEMP}/topo-llvm-core-build" --target install
 
-      # rust BEFORE the lang-cpp LLVM-scope install: topo-debug-rust is
-      # deferred upstream and self-skips while topo::lang-cpp::TopoDebugAdapter
-      # is not yet importable, keeping this build lean.
-      - name: Build & install topo-lang-rust (LLVM scope — TopoRustPlugin)
+      # LLVM scope for the RustDriver that topo-build-llvm-rust links (the
+      # plugin aggregator itself ships at default scope and needs none of
+      # this). rust BEFORE the lang-cpp LLVM-scope install: topo-debug-rust
+      # is deferred upstream and self-skips while
+      # topo::lang-cpp::TopoDebugAdapter is not yet importable, keeping
+      # this build lean.
+      - name: Build & install topo-lang-rust (LLVM scope — RustDriver)
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch "${TOPO_LANG_RUST_REF}" \
@@ -544,7 +640,10 @@ jobs:
                 -DTOPO_LANG_RUST_BUILD_TESTS=OFF
           cmake --build "${RUNNER_TEMP}/topo-lang-rust-build" --target install
 
-      - name: Build & install topo-lang-cpp (LLVM scope — TopoCppPlugin)
+      # LLVM scope for the CppDriver that topo-build-llvm-cpp links (the
+      # plugin aggregator itself ships at default scope and needs none of
+      # this).
+      - name: Build & install topo-lang-cpp (LLVM scope — CppDriver)
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
           LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
@@ -558,6 +657,22 @@ jobs:
                 -DTOPO_LANG_CPP_ENABLE_LLVM=ON \
                 -DCMAKE_POSITION_INDEPENDENT_CODE=ON
           cmake --build "${RUNNER_TEMP}/topo-lang-cpp-llvm-build" --target install
+
+      # Second configure of the topo-llvm build tree, now with tools ON:
+      # topo-build-llvm-{cpp,rust,mixed} link the LLVM-scoped TopoCppDriver
+      # / TopoRustDriver installed by the two steps above, which themselves
+      # need topo-llvm core headers — the standard bootstrap order
+      # (llvm core → lang LLVM scope → llvm tools). These tools are the
+      # cpp/rust backends the init→build smoke dispatches to.
+      - name: Build & install topo-llvm backend tools (tools ON)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
+          cmake -S "${RUNNER_TEMP}/topo-llvm-src" \
+                -B "${RUNNER_TEMP}/topo-llvm-core-build" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install;${LLVM_ROOT}" \
+                -DTOPO_LLVM_BUILD_TOOLS=ON
+          cmake --build "${RUNNER_TEMP}/topo-llvm-core-build" --target install
 
       - name: Build & install topo-lang-java
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
@@ -574,6 +689,32 @@ jobs:
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
                 -DTOPO_LANG_JAVA_BUILD_TESTS=OFF
           cmake --build "${RUNNER_TEMP}/topo-lang-java-build" --target install
+
+      # topo-build-jvm-java backend for the java init→build smoke. Needs
+      # topo-lang-java in the prefix (above). The transform jar must ride
+      # along: TOPO_JVM_BUILD_TRANSFORM stays ON (the tool hard-errors
+      # without topo-transform.jar), while decompile/tests are skipped.
+      # The install routes the jar to share/topo-jvm/lib but the tool
+      # resolves it NEXT TO ITS OWN BINARY — stage a copy into bin/ until
+      # topo-jvm's installed layout matches its runtime lookup.
+      - name: Build & install topo-jvm (topo-build-jvm-java + transform jar)
+        if: steps.topo-check-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "${TOPO_JVM_REF}" \
+              https://github.com/topo-lang/topo-jvm.git \
+              "${RUNNER_TEMP}/topo-jvm-src"
+          cmake -S "${RUNNER_TEMP}/topo-jvm-src" \
+                -B "${RUNNER_TEMP}/topo-jvm-build" \
+                -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
+                -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+                -DTOPO_JVM_BUILD_DECOMPILE=OFF \
+                -DTOPO_JVM_BUILD_TESTS=OFF
+          cmake --build "${RUNNER_TEMP}/topo-jvm-build" --target install
+          cp "${RUNNER_TEMP}/topo-install/share/topo-jvm/lib/topo-transform.jar" \
+             "${RUNNER_TEMP}/topo-install/bin/topo-transform.jar"
 
       - name: Build & install topo-lang-python
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
@@ -664,7 +805,8 @@ jobs:
         # could still mean "everything skipped". Re-run the suite binary and
         # assert from gtest's own summary that the always-on cases actually
         # executed (same mechanism as topo-lsp's live-bridge assertion).
-        # Today's suite: 8 always-on cases + 1 opt-in benchmark skip
+        # Today's suite: 10 always-on cases (8 single-language + the 2
+        # mixed-project cases) + 1 opt-in benchmark skip
         # (CheckRunner.JobsBenchmark_100Files_ParallelSpeedup, TOPO_BENCH_JOBS
         # unset). When per-language suites join this job, extend the binary
         # list below.
@@ -673,7 +815,7 @@ jobs:
           # no-match inside $() would otherwise abort the step silently).
           set +e
           ALLOWED_SKIP='CheckRunner.JobsBenchmark_100Files_ParallelSpeedup'
-          MIN_PASSED=8
+          MIN_PASSED=10
 
           # Self-test the parser + detector on a canned all-skip transcript
           # first, so a parsing regression cannot silently neutralize the
@@ -716,3 +858,14 @@ jobs:
             fi
           done
           [ "${fail}" -eq 0 ]
+
+      # Full scaffold smoke: per language init → topo-check exit 0 →
+      # topo-build exit 0. Every backend tool is in the prefix
+      # (topo-build-llvm-{cpp,rust} + topo-build-jvm-java from the steps
+      # above; topo-build-python / topo-build-typescript ship in the lang
+      # packages' default install sets), so a missing backend here is a
+      # regression, not an environment gap — REQUIRE_BUILD makes it fail.
+      - name: Init smoke (5 languages) — init → check → build
+        run: |
+          export PATH="${RUNNER_TEMP}/cli-install/bin:${RUNNER_TEMP}/topo-install/bin:${PATH}"
+          TOPO_INIT_SMOKE_REQUIRE_BUILD=1 sh test/smoke/run-init-smoke.sh
