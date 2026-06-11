@@ -4,9 +4,11 @@
 // completeness, containment, import-path.
 
 #include "CheckRunner.h"
+#include "MixedAnalysisProvider.h"
 
 #include "topo/Basic/Diagnostic.h"
 #include "topo/Basic/HostLanguage.h"
+#include "topo/Platform/FileGlob.h"
 #include "topo/Check/CompletenessCheck.h"
 #include "topo/Check/ContainmentCheck.h"
 #include "topo/Check/PurityCheck.h"
@@ -502,6 +504,33 @@ bool CheckRunner::loadConfig() {
     addDirs("build.sources");
     addDirs("build.include");
 
+    // Mixed projects describe their C++ source set in [build.cpp] (and the
+    // rust half via [build.rust].manifest) rather than [build].sources.
+    // Resolve the cpp paths into includeDirs_ so the composite provider's
+    // cpp half scans them; absent keys degrade to the providers' default
+    // project-directory scans (lenient by design).
+    std::string rustCrateDir;
+    if (language_ == HostLanguage::Mixed) {
+        if (auto* srcs = tbl.at_path("build.cpp.sources").as_array()) {
+            for (const auto& elem : *srcs) {
+                if (auto pat = elem.value<std::string>()) {
+                    auto expanded = platform::globExpand(fs::path(config_.projectDir), *pat);
+                    includeDirs_.insert(includeDirs_.end(), expanded.begin(), expanded.end());
+                }
+            }
+        }
+        if (auto* incs = tbl.at_path("build.cpp.include").as_array()) {
+            for (const auto& elem : *incs) {
+                if (auto dir = elem.value<std::string>()) {
+                    includeDirs_.push_back((fs::path(config_.projectDir) / *dir).string());
+                }
+            }
+        }
+        if (auto m = tbl.at_path("build.rust.manifest").value<std::string>()) {
+            rustCrateDir = (fs::path(config_.projectDir) / *m).parent_path().string();
+        }
+    }
+
     // [completeness] config
     if (auto ct = tbl["completeness"].as_table()) {
         completenessCfg_.ignoreConstructors =
@@ -557,19 +586,38 @@ bool CheckRunner::loadConfig() {
         }
     }
 
-    // Create language-specific analysis provider via plugin registry
-    auto* plugin = lang::getPlugin(language_);
-    if (!plugin) {
-        std::cerr << "Error: no language plugin registered for this language\n";
-        return false;
+    // Create language-specific analysis provider via plugin registry.
+    // Mixed has no plugin of its own — it composes the cpp and rust
+    // providers, so both plugins must be linked in; name the missing
+    // one(s) precisely (default-scope installs may carry a subset).
+    if (language_ == HostLanguage::Mixed) {
+        auto* cppPlugin = lang::getPlugin(HostLanguage::Cpp);
+        auto* rustPlugin = lang::getPlugin(HostLanguage::Rust);
+        if (!cppPlugin || !rustPlugin) {
+            std::cerr << "Error: mixed check requires the cpp and rust language plugins; missing:";
+            if (!cppPlugin) std::cerr << " cpp";
+            if (!rustPlugin) std::cerr << " rust";
+            std::cerr << "\n";
+            return false;
+        }
+        provider_ = std::make_unique<check::MixedAnalysisProvider>(
+            cppPlugin->createAnalysisProvider(), rustPlugin->createAnalysisProvider(),
+            std::move(rustCrateDir));
+    } else {
+        auto* plugin = lang::getPlugin(language_);
+        if (!plugin) {
+            std::cerr << "Error: no language plugin registered for this language\n";
+            return false;
+        }
+        provider_ = plugin->createAnalysisProvider();
     }
-    provider_ = plugin->createAnalysisProvider();
 
     if (config_.verbose) {
         const char* langStr = language_ == HostLanguage::Rust   ? "rust"
                               : language_ == HostLanguage::Java ? "java"
                               : language_ == HostLanguage::Python ? "python"
                               : language_ == HostLanguage::TypeScript ? "typescript"
+                              : language_ == HostLanguage::Mixed ? "mixed"
                                                                   : "cpp";
         std::cerr << "topo-check: project=" << config_.projectDir
                   << " language=" << langStr
@@ -1252,6 +1300,7 @@ int CheckRunner::run() {
                               : language_ == HostLanguage::Java ? "java"
                               : language_ == HostLanguage::Python ? "python"
                               : language_ == HostLanguage::TypeScript ? "typescript"
+                              : language_ == HostLanguage::Mixed ? "mixed"
                                                                   : "cpp";
 
         nlohmann::json output;
@@ -1291,6 +1340,7 @@ int CheckRunner::run() {
                               : language_ == HostLanguage::Java ? "Java"
                               : language_ == HostLanguage::Python ? "Python"
                               : language_ == HostLanguage::TypeScript ? "TypeScript"
+                              : language_ == HostLanguage::Mixed ? "Mixed (C++/Rust)"
                                                                   : "C++";
         std::cout << "topo-check: " << config_.projectDir << " (" << langStr << ")\n\n";
 

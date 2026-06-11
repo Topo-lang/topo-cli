@@ -6,7 +6,7 @@
 # every resolved Topo<Lang>Plugin aggregator and registers each one at
 # main() entry through TOPO_CLI_WITH_<LANG>_PLUGIN compile defs.
 
-add_library(TopoCheckRunner STATIC CheckRunner.cpp)
+add_library(TopoCheckRunner STATIC CheckRunner.cpp MixedAnalysisProvider.cpp)
 add_library(topo::cli::TopoCheckRunner ALIAS TopoCheckRunner)
 
 # topo::lang::TopoLang PUBLIC-propagates topo::core::TopoCheck →
