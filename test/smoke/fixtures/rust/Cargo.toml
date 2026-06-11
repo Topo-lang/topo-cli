@@ -1,0 +1,8 @@
+[package]
+# The package name must equal the project directory name the smoke
+# scaffolds into: topo-init derives the wrapper namespace from the
+# directory, and IR-level symbol mapping resolves it against the crate's
+# symbol-form name.
+name = "rustsmoke"
+version = "0.1.0"
+edition = "2021"

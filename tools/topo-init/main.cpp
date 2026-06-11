@@ -124,20 +124,21 @@ int main(int argc, char* argv[]) {
     std::string projectName = fs::path(fs::absolute(cfg.projectDir)).filename().string();
     topo::init::TopoGenerator gen(cfg.language, projectName);
 
-    // Determine sources glob for Topo.toml. Each language gets its own
-    // extension; Python/TypeScript previously fell through to "src/**/*.cpp",
-    // writing a glob that matched none of their sources.
+    // Determine [build].sources for Topo.toml. globExpand supports a
+    // single '*' in the filename component only — a '**' glob expands to
+    // NOTHING, leaving topo-build with zero sources. cpp/rust point at the
+    // flat src/ glob their drivers consume; the java/python/typescript
+    // drivers take the source directory itself (recursing internally, so
+    // a Maven src/main/java layout is covered too).
     std::string sourcesGlob;
     if (cfg.language == topo::HostLanguage::Rust)
-        sourcesGlob = "src/**/*.rs";
-    else if (cfg.language == topo::HostLanguage::Java)
-        sourcesGlob = "src/**/*.java";
-    else if (cfg.language == topo::HostLanguage::Python)
-        sourcesGlob = "src/**/*.py";
-    else if (cfg.language == topo::HostLanguage::TypeScript)
-        sourcesGlob = "src/**/*.ts";
+        sourcesGlob = "src/*.rs";
+    else if (cfg.language == topo::HostLanguage::Java ||
+             cfg.language == topo::HostLanguage::Python ||
+             cfg.language == topo::HostLanguage::TypeScript)
+        sourcesGlob = "src";
     else
-        sourcesGlob = "src/**/*.cpp";
+        sourcesGlob = "src/*.cpp";
 
     auto result = gen.generate(symbols, sourcesGlob);
 

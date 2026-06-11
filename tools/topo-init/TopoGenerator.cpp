@@ -63,14 +63,35 @@ std::string extractClassName(const std::string& enclosingClass) {
     return enclosingClass;
 }
 
-/// Join parameter types with ", ".
+/// Join parameters with ", ". Host extractors supply types only (HostSymbol
+/// carries no parameter names) while the grammar requires
+/// Parameter ::= Type Identifier — synthesize argN names.
 std::string renderParams(const std::vector<std::string>& paramTypes) {
     std::ostringstream out;
     for (size_t i = 0; i < paramTypes.size(); ++i) {
         if (i > 0) out << ", ";
-        out << paramTypes[i];
+        out << paramTypes[i] << " arg" << i;
     }
     return out.str();
+}
+
+/// Sanitize a project name into a legal .topo namespace identifier:
+/// non-alphanumerics map to '_', a leading digit gets a '_' prefix, an
+/// empty result falls back to "app". The '-' → '_' mapping matches
+/// cargo's package-name convention, keeping the wrapper namespace equal
+/// to a Rust crate's symbol-form name (which IR-level symbol mapping
+/// resolves against).
+std::string sanitizeNamespaceName(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_';
+        out.push_back(ok ? c : '_');
+    }
+    if (out.empty()) return "app";
+    if (out[0] >= '0' && out[0] <= '9') out.insert(out.begin(), '_');
+    return out;
 }
 
 /// Return type string: use extracted type if available, else "void".
@@ -84,7 +105,12 @@ std::string renderSymbol(const HostSymbol& sym) {
     std::ostringstream out;
     std::string params = renderParams(sym.paramTypes);
     switch (sym.kind) {
-    case HostSymbolKind::Constructor: out << sym.simpleName << "(" << params << ");"; break;
+    case HostSymbolKind::Constructor:
+        // The grammar names a constructor after its type; host extractors
+        // surface language-specific spellings (__init__, constructor), so
+        // derive the name from the enclosing class instead.
+        out << extractClassName(sym.enclosingClass) << "(" << params << ");";
+        break;
     case HostSymbolKind::Destructor: out << "~" << extractClassName(sym.enclosingClass) << "();"; break;
     case HostSymbolKind::StaticMethod:
         out << "static " << returnTypeOrVoid(sym) << " " << sym.simpleName << "(" << params << ");";
@@ -97,14 +123,6 @@ std::string renderSymbol(const HostSymbol& sym) {
     }
     if (needsTodoComment(sym)) out << "  // TODO: verify visibility";
     return out.str();
-}
-
-/// Render a type symbol declaration keyword.
-const char* typeKeyword(HostSymbolKind kind) {
-    switch (kind) {
-    case HostSymbolKind::Class: return "class";
-    default: return "type";
-    }
 }
 
 // Visibility ordering for output sections.
@@ -122,8 +140,12 @@ int visibilityOrder(Visibility v) {
 // ---- Grouping structures ------------------------------------------------
 
 struct ClassContent {
-    HostSymbolKind typeKind = HostSymbolKind::Class;
-    bool hasTodoComment = false; // for the type symbol itself
+    // Visibility of the type declaration itself — it places the `type`
+    // block inside a namespace visibility section. When the host extractor
+    // supplies no type symbol (members only), the Protected default stands
+    // and the declaration is flagged for user review.
+    Visibility visibility = Visibility::Protected;
+    bool hasTodoComment = true; // cleared when the type symbol carries a host visibility
     // Members grouped by visibility.
     std::map<Visibility, std::vector<std::string>> membersByVisibility;
 };
@@ -258,7 +280,11 @@ std::string TopoGenerator::generateTopoBody(const std::vector<HostSymbol>& symbo
         if (seen.insert(sym.qualifiedName).second) unique.push_back(&sym);
     }
 
-    // Step 2+3: Separate and group by namespace.
+    // Step 2+3: Separate and group by namespace. Empty-namespace symbols
+    // are wrapped in a sanitized project namespace: the TopoFile grammar
+    // allows only imports / data declarations / namespace blocks at the
+    // top level, so bare sections or type declarations would not parse.
+    const std::string wrapperNs = sanitizeNamespaceName(projectName_);
     std::map<std::string, NamespaceContent> namespaces;
 
     for (auto* sym : unique) {
@@ -271,11 +297,12 @@ std::string TopoGenerator::generateTopoBody(const std::vector<HostSymbol>& symbo
                        sym->kind == HostSymbolKind::TypeAlias);
 
         auto [ns, localName] = splitNamespace(sym->qualifiedName, isMember ? sym->enclosingClass : "");
+        if (ns.empty()) ns = wrapperNs;
 
         if (isType) {
             // Register class/struct/enum entry.
             auto& cls = namespaces[ns].classes[localName];
-            cls.typeKind = sym->kind;
+            cls.visibility = effectiveVisibility(*sym);
             cls.hasTodoComment = needsTodoComment(*sym);
         } else if (isMember) {
             std::string className = extractClassName(sym->enclosingClass);
@@ -289,44 +316,59 @@ std::string TopoGenerator::generateTopoBody(const std::vector<HostSymbol>& symbo
         }
     }
 
-    // Step 4: Emit .topo text.
+    // Step 4: Emit .topo text. A namespace body is strictly visibility
+    // sections (NamespaceDecl ::= "namespace" Path "{" { VisibilitySection }
+    // "}"), so type blocks are emitted inside their visibility section,
+    // never at namespace level.
     std::ostringstream out;
 
     for (auto& [ns, content] : namespaces) {
-        bool hasNamespace = !ns.empty();
-        int base = 0;
+        out << "namespace " << ns << " {\n";
 
-        if (hasNamespace) {
-            out << "namespace " << ns << " {\n";
-            base = 1;
+        // Gather every visibility level present, canonical order.
+        std::vector<Visibility> levels;
+        auto addLevel = [&](Visibility v) {
+            if (std::find(levels.begin(), levels.end(), v) == levels.end()) levels.push_back(v);
+        };
+        for (auto& [vis, syms] : content.freeByVisibility) {
+            if (!syms.empty()) addLevel(vis);
         }
-
-        // Emit free functions grouped by visibility.
-        if (!content.freeByVisibility.empty()) emitVisibilitySections(out, content.freeByVisibility, base);
-
-        // Emit classes.
         for (auto& [className, cls] : content.classes) {
-            // Determine the visibility to place the class under.
-            // For types that have members, we emit the class block.
-            indent(out, base);
-            out << typeKeyword(cls.typeKind) << " " << className << " {";
-            if (cls.hasTodoComment) out << "  // TODO: verify visibility";
-            out << "\n";
+            addLevel(cls.visibility);
+        }
+        std::sort(levels.begin(), levels.end(), [](Visibility a, Visibility b) {
+            return visibilityOrder(a) < visibilityOrder(b);
+        });
 
-            if (cls.membersByVisibility.empty()) {
-                // Empty body (enum or type with no extracted members).
-                indent(out, base);
-                out << "}\n";
-            } else {
-                emitVisibilitySections(out, cls.membersByVisibility, base + 1);
-                indent(out, base);
+        for (Visibility vis : levels) {
+            indent(out, 1);
+            out << visibilitySectionName(vis) << ":\n";
+
+            // Free functions of this visibility.
+            auto freeIt = content.freeByVisibility.find(vis);
+            if (freeIt != content.freeByVisibility.end()) {
+                for (auto& s : freeIt->second) {
+                    indent(out, 2);
+                    out << s << "\n";
+                }
+            }
+
+            // Type blocks of this visibility. Members are further grouped
+            // into visibility sections inside the type body; an empty body
+            // (enum or type with no extracted members) stays legal.
+            for (auto& [className, cls] : content.classes) {
+                if (cls.visibility != vis) continue;
+                indent(out, 2);
+                out << "type " << className << " {";
+                if (cls.hasTodoComment) out << "  // TODO: verify visibility";
+                out << "\n";
+                emitVisibilitySections(out, cls.membersByVisibility, 3);
+                indent(out, 2);
                 out << "}\n";
             }
         }
 
-        if (hasNamespace) out << "}\n";
-
-        out << "\n";
+        out << "}\n\n";
     }
 
     return out.str();
