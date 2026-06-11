@@ -492,6 +492,13 @@ int main(int argc, char* argv[]) {
         req.backendExtras["hostCompilerPath"] = cfg.hostCompilerPath;
         req.backendExtras["standard"] = cfg.standard;
     }
+    if (cfg.language == topo::HostLanguage::Cpp && !cfg.cppFlags.empty()) {
+        // [build.cpp].flags for plain cpp — the backend applies them at
+        // both compile-to-IR and link. Mixed transports its flags inside
+        // mixedConfig below; an older LLVM backend tolerates the extra
+        // key (unknown-extras rejection is JVM-only).
+        req.backendExtras["cppFlags"] = cfg.cppFlags;
+    }
     if (cfg.language == topo::HostLanguage::Rust) {
         req.backendExtras["cargoPath"] = cfg.cargoPath;
     }

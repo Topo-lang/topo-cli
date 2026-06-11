@@ -270,7 +270,8 @@ bool loadTopoToml(BuildConfig& cfg) {
                          "link_libs",
                          "link_dirs",
                          "cpp",
-                         "rust"});
+                         "rust",
+                         "java"});
     }
     if (auto* builderSec = tbl["builder"].as_table()) {
         warnUnknownKeys(
@@ -328,9 +329,12 @@ bool loadTopoToml(BuildConfig& cfg) {
         }
     }
 
-    // [build.cpp] and [build.rust] — mixed C++/Rust project subsections
-    if (cfg.language == HostLanguage::Mixed) {
-        if (auto* cppTbl = tbl["build"]["cpp"].as_table()) {
+    // [build.cpp] — consumed for cpp (flags) and mixed (sources / include /
+    // flags). Handled for every language so a misplaced section warns
+    // instead of silently no-oping.
+    if (auto* cppTbl = tbl["build"]["cpp"].as_table()) {
+        warnUnknownKeys(*cppTbl, "[build.cpp]", {"sources", "include", "flags"});
+        if (cfg.language == HostLanguage::Mixed) {
             if (auto* srcs = (*cppTbl)["sources"].as_array()) {
                 for (const auto& elem : *srcs) {
                     if (auto pat = elem.value<std::string>()) {
@@ -351,7 +355,26 @@ bool loadTopoToml(BuildConfig& cfg) {
                     if (auto sv = elem.value<std::string>()) cfg.mixedCfg.cppFlags.push_back(*sv);
                 }
             }
+        } else if (cfg.language == HostLanguage::Cpp) {
+            if (cppTbl->contains("sources") || cppTbl->contains("include")) {
+                std::cerr << "warning: [build.cpp].sources/.include are only consumed for "
+                             "language = \"mixed\" (ignored — use [build].sources / "
+                             "[build].include)\n";
+            }
+            if (auto* flags = (*cppTbl)["flags"].as_array()) {
+                for (const auto& elem : *flags) {
+                    if (auto sv = elem.value<std::string>()) cfg.cppFlags.push_back(*sv);
+                }
+            }
+        } else {
+            std::cerr << "warning: [build.cpp] is ignored for language '"
+                      << tbl["build"]["language"].value<std::string>().value_or("cpp")
+                      << "'\n";
         }
+    }
+
+    // [build.rust] — mixed C++/Rust project subsection
+    if (cfg.language == HostLanguage::Mixed) {
         if (auto* rustTbl = tbl["build"]["rust"].as_table()) {
             if (auto m = (*rustTbl)["manifest"].value<std::string>()) {
                 cfg.mixedCfg.rustManifest = (baseDir / *m).string();
