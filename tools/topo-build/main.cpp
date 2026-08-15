@@ -380,21 +380,7 @@ int main(int argc, char* argv[]) {
     // > [build].check on/off > auto, where auto checks EVERY build — the
     // incremental check cache keeps no-change rebuilds near zero cost)
     // ================================================================
-    // Mixed C++/Rust projects have no registered checker (the per-language
-    // plugin registry covers cpp/rust/java/python/typescript; the mixed
-    // driver spans two of them), so the default-on check would fail every
-    // mixed build with "no language plugin registered". Skip with an
-    // explicit note instead — but honor an explicit --check /
-    // [build].check="on" request by letting topo-check report the gap
-    // loudly itself.
-    bool checkExplicitlyRequested =
-        (cfg.checkCliOverride.has_value() && *cfg.checkCliOverride) ||
-        cfg.checkMode == CheckMode::On;
-    if (cfg.shouldRunCheck() && cfg.language == topo::HostLanguage::Mixed &&
-        !checkExplicitlyRequested) {
-        std::cerr << "note: skipping topo-check — no checker is registered for mixed\n"
-                  << "  C++/Rust projects yet (pass --check to force the attempt)\n";
-    } else if (cfg.shouldRunCheck()) {
+    if (cfg.shouldRunCheck()) {
         std::string checkTool = findBackendTool("topo-check");
         if (checkTool.empty()) {
             std::cerr << "error: topo-check not found (checks run on every build by default)\n"
@@ -505,6 +491,13 @@ int main(int argc, char* argv[]) {
         cfg.language == topo::HostLanguage::Mixed) {
         req.backendExtras["hostCompilerPath"] = cfg.hostCompilerPath;
         req.backendExtras["standard"] = cfg.standard;
+    }
+    if (cfg.language == topo::HostLanguage::Cpp && !cfg.cppFlags.empty()) {
+        // [build.cpp].flags for plain cpp — the backend applies them at
+        // both compile-to-IR and link. Mixed transports its flags inside
+        // mixedConfig below; an older LLVM backend tolerates the extra
+        // key (unknown-extras rejection is JVM-only).
+        req.backendExtras["cppFlags"] = cfg.cppFlags;
     }
     if (cfg.language == topo::HostLanguage::Rust) {
         req.backendExtras["cargoPath"] = cfg.cargoPath;
