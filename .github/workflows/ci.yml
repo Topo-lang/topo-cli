@@ -19,7 +19,11 @@ env:
   TOPO_CORE_REF: dev
   TOPO_LANG_REF: main
   TOPO_V8_REF: main
-  TOPO_LLVM_REF: main
+  # topo-llvm dev-pinned for the fix batch: the init-smoke rust build half
+  # declares struct impl methods, whose IR verification needs the rust-v0
+  # symbol-map + verifier fixes that live only on topo-llvm dev. Flip back
+  # to main at promotion.
+  TOPO_LLVM_REF: dev
   TOPO_JVM_REF: main
   TOPO_LANG_CPP_REF: dev
   TOPO_LANG_RUST_REF: dev
@@ -508,7 +512,10 @@ jobs:
           # plugin aggregators.
           # v4: dev-pinned upstream tips advanced (see the build-and-smoke
           # key) — force the fresh clone.
-          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v4
+          # v5: topo-lang-rust + topo-llvm dev tips advanced again (Self
+          # normalization + symbol-map/verifier follow-ups), and the cached
+          # LLVM-scope artifacts showed a producer/reader skew — rotate.
+          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v5
 
       # liblldb in the bundled LLVM (linked by topo-lang-cpp's
       # topo-debug-cpp at LLVM scope) needs libpython3.11, absent on
