@@ -412,6 +412,11 @@ jobs:
   #      static-CRT pinning, see topo-lang-cpp CI). The init → check half
   #      gets its Windows coverage in build-and-smoke instead.
   #
+  # LLVM here serves the backend tools (CppDriver / RustDriver) and the
+  # clangd-backed L2 containment cases — NOT the plugin aggregators, which
+  # build in the default (zero-LLVM) scope and are exercised by the
+  # build-and-smoke five-plugin assert.
+  #
   # The per-language checker-e2e suites (topo-lang-*/test) are the natural
   # next addition: configure each repo's suite against this same prefix and
   # extend the assert step's binary list.
