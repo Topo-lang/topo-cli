@@ -113,7 +113,11 @@ jobs:
           # (plugin aggregators ungated upstream) and topo-core BuildConfig
           # gained cppFlags, consumed by tools/topo-build/Config.cpp — the
           # stale -v8 prefix lacks both.
-          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v9
+          # v10: the dev-pinned upstream tips advanced (fix batch merged to
+          # core/cpp/rust dev); the key interpolates the refs, not their
+          # content, so the pre-merge cache would keep serving fix-less
+          # upstreams.
+          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v10
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.topo-cache.outputs.cache-hit != 'true'
@@ -502,7 +506,9 @@ jobs:
           # topo-jvm joined for the init→build smoke, and the cached
           # pre-ungate lang-cpp/rust installs lack the default-scope
           # plugin aggregators.
-          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v3
+          # v4: dev-pinned upstream tips advanced (see the build-and-smoke
+          # key) — force the fresh clone.
+          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v4
 
       # liblldb in the bundled LLVM (linked by topo-lang-cpp's
       # topo-debug-cpp at LLVM scope) needs libpython3.11, absent on
