@@ -378,6 +378,16 @@ jobs:
           CLI_BIN="${RUNNER_TEMP}/cli-install/bin"
           if [ "${RUNNER_OS}" = "Windows" ]; then
             CLI_BIN="$(cygpath -u "${CLI_BIN}")"
+            # Windows: the tools are MinGW-built (libstdc++-6 / libgcc_s_seh-1 /
+            # libwinpthread-1). Strawberry Perl's stale runtime DLLs sit
+            # earlier on PATH and shadow the build compiler's — the tools die
+            # silently (loader abort, zero output). Put the exact build-time
+            # gcc bin dir FIRST (same recipe as topo-core's windows test step
+            # and topo-jvm's).
+            cxx=$(grep -m1 '^CMAKE_CXX_COMPILER:' build/CMakeCache.txt | cut -d= -f2)
+            if [ -n "$cxx" ]; then
+              export PATH="$(cygpath -u "$(dirname "$cxx")"):${PATH}"
+            fi
           fi
           export PATH="${CLI_BIN}:${PATH}"
           TOPO_INIT_SMOKE_CHECK_ONLY=1 sh test/smoke/run-init-smoke.sh java python typescript
@@ -885,5 +895,16 @@ jobs:
       # regression, not an environment gap — REQUIRE_BUILD makes it fail.
       - name: Init smoke (5 languages) — init → check → build
         run: |
-          export PATH="${RUNNER_TEMP}/cli-install/bin:${RUNNER_TEMP}/topo-install/bin:${PATH}"
+          # The smoke's backend tools spawn clang++ resolved from PATH for the
+          # final link/object steps; the IR producer is the pinned LLVM 22
+          # clang, and the runner's PATH clang (distro 18 / Apple 15) reads
+          # that IR with an older reader — "Invalid attribute group entry
+          # (Producer: LLVM22 Reader: LLVM 18/APPLE)". Put the pinned LLVM's
+          # bin dir FIRST so every spawn inside the smoke sees one LLVM.
+          LLVM_BIN="$(dirname "$(dirname "$(dirname "${LLVM_DIR}")")")/bin"
+          if [ ! -x "${LLVM_BIN}/clang++" ]; then
+            echo "::error::pinned clang++ not found at ${LLVM_BIN} — the smoke would silently pick the system clang and hit the producer/reader skew"
+            exit 1
+          fi
+          export PATH="${RUNNER_TEMP}/cli-install/bin:${RUNNER_TEMP}/topo-install/bin:${LLVM_BIN}:${PATH}"
           TOPO_INIT_SMOKE_REQUIRE_BUILD=1 sh test/smoke/run-init-smoke.sh
