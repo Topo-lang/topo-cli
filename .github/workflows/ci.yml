@@ -17,11 +17,9 @@ env:
   TOPO_CORE_REF: main
   TOPO_LANG_REF: main
   TOPO_V8_REF: main
-  # topo-llvm STILL dev-pinned at this wave: the init-smoke rust build half
-  # declares struct impl methods, whose IR verification needs the rust-v0
-  # symbol-map + verifier fixes that live only on topo-llvm dev — topo-llvm
-  # main gains them at ITS promotion (the wave-4.5 flip covers this ref).
-  TOPO_LLVM_REF: dev
+  # topo-llvm unpinned at promotion (2026-08-16): the rust-v0 symbol-map +
+  # verifier fixes are on topo-llvm main now.
+  TOPO_LLVM_REF: main
   TOPO_JVM_REF: main
   TOPO_LANG_CPP_REF: main
   TOPO_LANG_RUST_REF: main
