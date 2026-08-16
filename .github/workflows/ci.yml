@@ -11,22 +11,20 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # topo-core / topo-lang-cpp / topo-lang-rust are dev-pinned while the
-  # current fix batch rides those repos' dev branches (topo-core:
-  # BuildConfig::cppFlags + the mixed checker fixtures the integrated
-  # suite consumes; lang-cpp/rust: plugin aggregators ungated into the
-  # default install set). Flip back to main at promotion.
-  TOPO_CORE_REF: dev
+  # topo-core / topo-lang-cpp / topo-lang-rust unpinned at promotion
+  # (2026-08-16): BuildConfig::cppFlags, the mixed checker fixtures, and
+  # the ungated plugin aggregators are all on main now.
+  TOPO_CORE_REF: main
   TOPO_LANG_REF: main
   TOPO_V8_REF: main
-  # topo-llvm dev-pinned for the fix batch: the init-smoke rust build half
+  # topo-llvm STILL dev-pinned at this wave: the init-smoke rust build half
   # declares struct impl methods, whose IR verification needs the rust-v0
-  # symbol-map + verifier fixes that live only on topo-llvm dev. Flip back
-  # to main at promotion.
+  # symbol-map + verifier fixes that live only on topo-llvm dev — topo-llvm
+  # main gains them at ITS promotion (the wave-4.5 flip covers this ref).
   TOPO_LLVM_REF: dev
   TOPO_JVM_REF: main
-  TOPO_LANG_CPP_REF: dev
-  TOPO_LANG_RUST_REF: dev
+  TOPO_LANG_CPP_REF: main
+  TOPO_LANG_RUST_REF: main
   TOPO_LANG_JAVA_REF: main
   TOPO_LANG_PYTHON_REF: main
   TOPO_LANG_TYPESCRIPT_REF: main
