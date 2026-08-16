@@ -31,6 +31,16 @@ target_include_directories(topo-init PRIVATE
 )
 topo_cli_set_compiler_flags(topo-init)
 
+# Windows/MinGW: the installed exe shared-links the MinGW runtime
+# (libstdc++-6 / libgcc_s_seh-1 / libwinpthread-1), whose DLLs resolve
+# from PATH at launch — stale copies (e.g. Strawberry Perl's, earlier on
+# PATH) shadow the build compiler's and the tool dies silently before
+# main. Static-link the runtime so the shipped tool is hermetic (same
+# recipe as the find_package smoke binary).
+if(MINGW)
+    target_link_options(topo-init PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
 install(TARGETS topo-init
     EXPORT topo-cliTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
