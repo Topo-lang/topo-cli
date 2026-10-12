@@ -32,7 +32,9 @@ static void printUsage(const char* argv0) {
               << "                      blocks, leaf bodies from adapters)\n"
               << "  --to <lang>         Target language (cpp/rust/java/python/typescript)\n"
               << "  --sources <files>   Source files to extract from (comma-separated).\n"
-              << "                      Required for host-source mode; ignored for --from topo\n"
+              << "                      Required unless --java-project supplies files; ignored for --from topo\n"
+              << "  --java-project <file> Java project model JSON (sourceLevel, classpath,\n"
+              << "                      sourcepath, files); --sources overrides model files\n"
               << "  --adapters <file>   topo-app adapter manifest (JSON); .topo-source mode\n"
               << "                      only. The builtin adapter source is always used\n"
               << "  --tpm-adapters <pkg>=<file>\n"
@@ -110,6 +112,7 @@ int main(int argc, char* argv[]) {
     std::string toLang;
     std::string sourcesStr;
     std::string adaptersPath;
+    std::string javaProjectPath;
     std::vector<std::string> tpmAdapterSpecs; // raw "<pkg>=<path>" specs
     std::string outputDir = "./transpiled/";
     std::string functionsStr;
@@ -138,6 +141,14 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             toLang = argv[++i];
+            continue;
+        }
+        if (arg == "--java-project") {
+            if (i + 1 >= argc) {
+                std::cerr << "error: --java-project requires a file\n";
+                return 1;
+            }
+            javaProjectPath = argv[++i];
             continue;
         }
         if (arg == "--sources") {
@@ -265,7 +276,11 @@ int main(int argc, char* argv[]) {
         std::cerr << "error: source and target languages must differ\n";
         return 1;
     }
-    if (!fromTopoSource && sourcesStr.empty()) {
+    if (!javaProjectPath.empty() && fromLang != "java") {
+        std::cerr << "error: --java-project requires --from java\n";
+        return 1;
+    }
+    if (!fromTopoSource && sourcesStr.empty() && javaProjectPath.empty()) {
         std::cerr << "error: --sources is required\n";
         printUsage(argv[0]);
         return 1;
@@ -318,6 +333,7 @@ int main(int argc, char* argv[]) {
         request.functions = splitComma(functionsStr);
     }
 
+    request.javaProjectPath = javaProjectPath;
     request.pipelineName = pipelineName;
     request.verifyMaxUnsupported = verifyMaxUnsupported;
 

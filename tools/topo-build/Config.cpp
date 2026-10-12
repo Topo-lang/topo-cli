@@ -284,6 +284,7 @@ bool loadTopoToml(BuildConfig& cfg) {
                                                             "project",
                                                             "build",
                                                             "builder",
+                                                            "check",
                                                             "parallel",
                                                             "adaptive",
                                                             "optimize",

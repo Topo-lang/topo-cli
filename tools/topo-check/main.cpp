@@ -33,6 +33,7 @@ void printUsage(const char* argv0) {
     std::cerr << "Usage: " << argv0 << " [options]\n"
               << "\n"
               << "  --project <dir>      Project directory (default: current directory)\n"
+              << "  --java-project <file> Java source/classpath model (JSON)\n"
               << "  --check <name>       Check to run:\n"
               << "                         completeness, containment, import-path,\n"
               << "                         purity, visibility, stage-isolation, all\n"
@@ -59,6 +60,12 @@ bool parseArgs(int argc, char* argv[], topo::CheckConfig& cfg) {
                 return false;
             }
             cfg.projectDir = argv[++i];
+        } else if (std::strcmp(argv[i], "--java-project") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "Error: --java-project requires a file\n";
+                return false;
+            }
+            cfg.javaProjectPath = argv[++i];
         } else if (std::strcmp(argv[i], "--check") == 0) {
             if (i + 1 >= argc) {
                 std::cerr << "Error: --check requires an argument\n";

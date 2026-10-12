@@ -17,6 +17,7 @@ namespace topo {
 
 struct CheckConfig {
     std::string projectDir = ".";
+    std::string javaProjectPath; // --java-project; otherwise [check].java_project
     std::string checkName = "all"; // completeness|containment|import-path|purity|visibility|stage-isolation|all
     std::string filter;
     bool verbose = false;

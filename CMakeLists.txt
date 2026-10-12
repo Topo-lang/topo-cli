@@ -182,14 +182,24 @@ install(FILES
 )
 
 # ── Tests ─────────────────────────────────────────────
-# topo-cli ships no unit tests in the subtree — the historical test
-# fixtures lived under topo-core/test/ + each topo-lang-*'s test/
-# (the deferred E2eHarness suites). The standalone build of topo-cli
-# is a pure binary build; verification is via the downstream
-# find_package smoke test and by running each installed CLI with
-# --help / --version.
-option(TOPO_CLI_BUILD_TESTS "Build topo-cli tests (no-op: no tests in this subtree)" OFF)
+option(TOPO_CLI_BUILD_TESTS "Build topo-cli tests" OFF)
 if(TOPO_CLI_BUILD_TESTS AND (PROJECT_IS_TOP_LEVEL OR TOPO_META_DRIVING_TESTS))
     enable_testing()
-    message(STATUS "topo-cli: no in-tree tests; verification is via the find_package smoke step.")
+endif()
+
+# Full Java project input path, including a real external class dependency.
+# The extractor and JDK are optional in standalone C++-only installations.
+if(TOPO_META_DRIVING_TESTS AND TARGET topo-extract-java AND TOPO_GRADLE_JAVA_HOME)
+    enable_testing()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME e2e.cli.java_project_model
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/java_project.py"
+                --check "$<TARGET_FILE:topo-check>"
+                --transpile "$<TARGET_FILE:topo-transpile>"
+                --javac "${TOPO_GRADLE_JAVA_HOME}/bin/javac"
+                --extractor-dir "${CMAKE_BINARY_DIR}")
+        set_tests_properties(e2e.cli.java_project_model PROPERTIES
+            LABELS "e2e;java;cli;project-model" TIMEOUT 180)
+    endif()
 endif()

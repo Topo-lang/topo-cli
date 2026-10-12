@@ -233,6 +233,9 @@ std::vector<std::string> CheckRunner::discoverRelevantFiles() const {
 }
 
 bool CheckRunner::tryCacheHit(int& cachedResult) {
+    // Java binding facts depend on external jars, generated sources and class
+    // directories. Source-only cache entries cannot certify those inputs.
+    if (language_ == HostLanguage::Java) return false;
     // Only cache for default configuration (all checks, no filter)
     if (config_.checkName != "all" || !config_.filter.empty()) return false;
 
@@ -278,6 +281,7 @@ bool CheckRunner::tryCacheHit(int& cachedResult) {
 }
 
 void CheckRunner::saveCheckCache(int result) {
+    if (language_ == HostLanguage::Java) return;
     // Only cache for default configuration
     if (config_.checkName != "all" || !config_.filter.empty()) return;
 
@@ -309,6 +313,13 @@ void CheckRunner::saveCheckCache(int result) {
 
 int CheckRunner::listUnsafePoints() {
     auto sourceFiles = collectSourceFiles();
+    bool analysisFailed = false;
+    for (const auto& diagnostic : provider_->analysisDiagnostics()) {
+        std::cerr << diagnostic.file << ":" << diagnostic.line << ": "
+                  << diagnostic.message << "\n";
+        if (diagnostic.severity == check::Severity::Error) analysisFailed = true;
+    }
+    if (analysisFailed) return -1;
     if (sourceFiles.empty()) {
         std::cout << "No source files found.\n";
         return 0;
@@ -487,6 +498,15 @@ bool CheckRunner::loadConfig() {
         language_ = parseHostLanguage(*v);
     }
 
+    if (config_.javaProjectPath.empty()) {
+        if (auto v = tbl.at_path("check.java_project").value<std::string>())
+            config_.javaProjectPath = (fs::path(config_.projectDir) / *v).string();
+    }
+    if (!config_.javaProjectPath.empty() && language_ != HostLanguage::Java) {
+        std::cerr << "error: java_project requires build.language = java\n";
+        return false;
+    }
+
     // [build].sources + [build].include -> includeDirs_
     auto addDirs = [&](const char* path) {
         if (auto arr = tbl.at_path(path).as_array()) {
@@ -611,6 +631,20 @@ bool CheckRunner::loadConfig() {
         }
         provider_ = plugin->createAnalysisProvider();
     }
+    if (!provider_) {
+        std::cerr << "Error: language plugin has no analysis provider\n";
+        return false;
+    }
+    if (!config_.javaProjectPath.empty()) {
+        std::error_code ec;
+        auto absolute = fs::absolute(config_.javaProjectPath, ec);
+        if (ec) {
+            std::cerr << "error: cannot resolve Java project model: " << ec.message() << "\n";
+            return false;
+        }
+        config_.javaProjectPath = absolute.lexically_normal().string();
+    }
+    provider_->configureAnalysis(config_.projectDir, config_.javaProjectPath);
 
     if (config_.verbose) {
         const char* langStr = language_ == HostLanguage::Rust   ? "rust"
@@ -1289,6 +1323,15 @@ int CheckRunner::run() {
         auto r = runStageIsolation();
         if (!r.passed()) anyErrors = true;
         results.push_back({"stage-isolation", std::move(r)});
+    }
+
+    check::CheckResult analysis;
+    for (auto diagnostic : provider_->analysisDiagnostics())
+        analysis.addDiagnostic(std::move(diagnostic));
+    if (!analysis.diagnostics.empty()) {
+        if (!analysis.passed()) anyErrors = true;
+        results.push_back({language_ == HostLanguage::Java ? "java-analysis" : "analysis",
+                           std::move(analysis)});
     }
 
     // Store results for programmatic access
