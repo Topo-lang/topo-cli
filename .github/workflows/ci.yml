@@ -117,7 +117,8 @@ jobs:
           # core/cpp/rust dev); the key interpolates the refs, not their
           # content, so the pre-merge cache would keep serving fix-less
           # upstreams.
-          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v10
+          # v11-audit: require current audit APIs and language providers.
+          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v11-audit
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.topo-cache.outputs.cache-hit != 'true'
@@ -476,9 +477,9 @@ jobs:
           echo "LLVM_DIR=${LLVM_ROOT}/lib/cmake/llvm"   >> "$GITHUB_ENV"
           echo "Clang_DIR=${LLVM_ROOT}/lib/cmake/clang" >> "$GITHUB_ENV"
 
-      # The Java init→build smoke runs topo-build-jvm-java and executes
-      # topo-transform.jar, whose Gradle toolchain targets Java 25.
-      # Use the same JDK for the smoke runtime and build toolchain.
+      # JDK 21 (not 17): the java init→build smoke runs topo-build-jvm-java,
+      # which executes topo-transform.jar — compiled to JDK 21 class files
+      # by its Gradle toolchain — so the runtime java must be >= 21.
       - name: Set up JDK 25
         uses: actions/setup-java@v5
         with:
@@ -521,7 +522,8 @@ jobs:
           # v5: topo-lang-rust + topo-llvm dev tips advanced again (Self
           # normalization + symbol-map/verifier follow-ups), and the cached
           # LLVM-scope artifacts showed a producer/reader skew — rotate.
-          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v5
+          # v6-audit: rebuild the audit-aware core, providers and Java backend.
+          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v6-audit
 
       # liblldb in the bundled LLVM (linked by topo-lang-cpp's
       # topo-debug-cpp at LLVM scope) needs libpython3.11, absent on

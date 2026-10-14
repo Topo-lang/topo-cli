@@ -1,0 +1,154 @@
+name: Audit verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_sha:
+        description: "topo-core immutable 40-character commit SHA"
+        required: true
+        type: string
+      lang_sha:
+        description: "topo-lang immutable 40-character commit SHA"
+        required: true
+        type: string
+      cpp_sha:
+        description: "topo-lang-cpp immutable 40-character commit SHA"
+        required: true
+        type: string
+      java_sha:
+        description: "topo-lang-java immutable 40-character commit SHA"
+        required: true
+        type: string
+      jvm_sha:
+        description: "topo-jvm immutable 40-character commit SHA"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: audit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CORE_SHA: ${{ inputs.core_sha }}
+      LANG_SHA: ${{ inputs.lang_sha }}
+      CPP_SHA: ${{ inputs.cpp_sha }}
+      JAVA_SHA: ${{ inputs.java_sha }}
+      JVM_SHA: ${{ inputs.jvm_sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Require immutable dependency identities
+        run: |
+          python - <<'PY'
+          import os, re
+          for key in ('CORE_SHA', 'LANG_SHA', 'CPP_SHA', 'JAVA_SHA', 'JVM_SHA'):
+              if not re.fullmatch('[0-9a-fA-F]{40}', os.environ[key]):
+                  raise SystemExit(f'{key} must be an immutable 40-character commit SHA')
+          PY
+      - uses: actions/checkout@v5
+        with:
+          repository: Topo-lang/topo-core
+          ref: ${{ inputs.core_sha }}
+          path: .audit-src/topo-core
+      - uses: actions/checkout@v5
+        if: runner.os == 'macOS'
+        with:
+          repository: Topo-lang/topo-lang
+          ref: ${{ inputs.lang_sha }}
+          path: .audit-src/topo-lang
+      - uses: actions/checkout@v5
+        if: runner.os == 'macOS'
+        with:
+          repository: Topo-lang/topo-lang-cpp
+          ref: ${{ inputs.cpp_sha }}
+          path: .audit-src/topo-lang-cpp
+      - uses: actions/checkout@v5
+        if: runner.os == 'macOS'
+        with:
+          repository: Topo-lang/topo-lang-java
+          ref: ${{ inputs.java_sha }}
+          path: .audit-src/topo-lang-java
+      - uses: actions/checkout@v5
+        if: runner.os == 'macOS'
+        with:
+          repository: Topo-lang/topo-jvm
+          ref: ${{ inputs.jvm_sha }}
+          path: .audit-src/topo-jvm
+      - name: Record and verify checked-out source identities
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          rows = []
+          for repo, key in [('topo-cli', 'GITHUB_SHA'), ('topo-core', 'CORE_SHA'),
+                            ('topo-lang', 'LANG_SHA'), ('topo-lang-cpp', 'CPP_SHA'),
+                            ('topo-lang-java', 'JAVA_SHA'), ('topo-jvm', 'JVM_SHA')]:
+              path = pathlib.Path('.') if repo == 'topo-cli' else pathlib.Path('.audit-src') / repo
+              if not path.exists():
+                  continue
+              actual = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
+              expected = os.environ[key].lower()
+              if actual != expected:
+                  raise SystemExit(f'{repo}: expected {expected}, got {actual}')
+              rows.append({'repository': 'Topo-lang/' + repo, 'sha': actual})
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'audit-build/evidence'
+          evidence.mkdir(parents=True, exist_ok=True)
+          (evidence / 'source-identities.json').write_text(json.dumps(rows, indent=2) + '\n')
+          PY
+      - name: Enable MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ninja-build
+      - name: Install macOS build tools and libclang
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja llvm@22
+          echo "TOPO_AUDIT_LLVM_ROOT=$(brew --prefix llvm@22)" >> "$GITHUB_ENV"
+      - name: Set up JDK 25
+        if: runner.os == 'macOS'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '56bb2411609227288b70117ead2c47585ba07713'
+      # Linux verifies default-OFF, then two separate opt-in result gates:
+      # the official audit API must still refuse execution; experimental
+      # resource controls include the readable-ELF loader counterexample
+      # and do not enable audit support.
+      - name: Verify audit contracts and separate Linux experimental controls
+        run: |
+          set -o pipefail
+          python .github/scripts/build_audit_ci.py \
+            --sources .audit-src --work "$RUNNER_TEMP/audit-build" \
+            --platform "$RUNNER_OS" \
+            --toolchain "$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            2>&1 | tee "$RUNNER_TEMP/audit-build/evidence/build-and-test.log"
+      - name: Upload source identities and actual test results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: audit-evidence-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/audit-build/evidence/
+            ${{ runner.temp }}/audit-build/core-tests/Testing/Temporary/
+            ${{ runner.temp }}/audit-build/extractor/Testing/Temporary/
+            ${{ runner.temp }}/audit-build/topo-cli/Testing/Temporary/
