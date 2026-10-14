@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Run required audit suites and reject absent, disabled, skipped or failed tests."""
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -10,6 +13,28 @@ import xml.etree.ElementTree as ET
 
 def run(build, suite, evidence, platform):
     evidence.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    if platform == "Windows":
+        # Match the compiler's runtime at the point of execution. Other Actions
+        # can prepend tools with incompatible MinGW DLLs after initial setup.
+        compiler = next((line.split("=", 1)[1] for line in
+                         (build / "CMakeCache.txt").read_text().splitlines()
+                         if line.startswith("CMAKE_CXX_COMPILER:")), None)
+        if not compiler or not Path(compiler).is_file():
+            raise RuntimeError("CMake cache does not identify an existing C++ compiler")
+        compiler_bin = Path(compiler).resolve().parent
+        environment["PATH"] = str(compiler_bin) + os.pathsep + environment.get("PATH", "")
+        # These are candidates on PATH, not a claim about the loader's mappings.
+        candidates = {name: hashlib.sha256((compiler_bin / name).read_bytes()).hexdigest()
+                      for name in ("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")
+                      if (compiler_bin / name).is_file()}
+        (evidence / f"{suite}-runtime-environment.json").write_text(json.dumps({
+            "compiler": str(Path(compiler).resolve()),
+            "compilerBin": str(compiler_bin),
+            "ctest": shutil.which("ctest", path=environment["PATH"]),
+            "path": environment["PATH"],
+            "compilerRuntimeCandidateSha256": candidates,
+        }, indent=2) + "\n")
     pattern = {"core": r"^(AuditTest|AnalysisProcessTest)\.",
                "linux-default": r"^(AuditTest|AnalysisProcessTest)\.",
                "linux-experimental": r"^ExperimentalLinuxAnalysisProcessTest\.",
@@ -17,7 +42,7 @@ def run(build, suite, evidence, platform):
                "cli": r"^(AuditSupportTest\.|e2e\.cli\..*audit)"}[suite]
     command = ["ctest", "--test-dir", str(build), "-C", "Release", "-R", pattern]
     listing = subprocess.run(command + ["--show-only=json-v1"], check=False,
-                             capture_output=True)
+                             capture_output=True, env=environment)
     # PRE_TEST discovery can fail before CTest creates a useful LastTest.log.
     # Preserve the original bytes and expose the error before failing the gate.
     (evidence / f"{suite}-discovery.stdout.log").write_bytes(listing.stdout)
@@ -79,7 +104,8 @@ def run(build, suite, evidence, platform):
         raise RuntimeError(f"Missing required tests: {sorted(missing)}; disabled tests: {disabled}")
     junit = evidence / f"{suite}-junit.xml"
     result = subprocess.run(command + ["--no-tests=error", "--output-on-failure",
-                                      "--output-junit", str(junit)], check=False)
+                                      "--output-junit", str(junit)], check=False,
+                            env=environment)
     if not junit.exists():
         raise RuntimeError(f"CTest produced no result file (exit {result.returncode})")
     cases = ET.parse(junit).getroot().findall(".//testcase")
