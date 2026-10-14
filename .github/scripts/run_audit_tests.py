@@ -16,9 +16,19 @@ def run(build, suite, evidence, platform):
                "cpp": r"^cpp-audit-semantic\.",
                "cli": r"^(AuditSupportTest\.|e2e\.cli\..*audit)"}[suite]
     command = ["ctest", "--test-dir", str(build), "-C", "Release", "-R", pattern]
-    listing = subprocess.run(command + ["--show-only=json-v1"], check=True,
-                             capture_output=True, text=True)
-    (evidence / f"{suite}-registered.json").write_text(listing.stdout)
+    listing = subprocess.run(command + ["--show-only=json-v1"], check=False,
+                             capture_output=True)
+    # PRE_TEST discovery can fail before CTest creates a useful LastTest.log.
+    # Preserve the original bytes and expose the error before failing the gate.
+    (evidence / f"{suite}-discovery.stdout.log").write_bytes(listing.stdout)
+    (evidence / f"{suite}-discovery.stderr.log").write_bytes(listing.stderr)
+    if listing.returncode:
+        sys.stdout.buffer.write(listing.stdout)
+        sys.stdout.flush()
+        sys.stderr.buffer.write(listing.stderr)
+        sys.stderr.flush()
+        raise RuntimeError(f"CTest discovery failed (exit {listing.returncode})")
+    (evidence / f"{suite}-registered.json").write_bytes(listing.stdout)
     tests = json.loads(listing.stdout)["tests"]
     names = {test["name"] for test in tests}
     if suite in ("core", "linux-default"):
@@ -49,6 +59,7 @@ def run(build, suite, evidence, platform):
             "ReadableImagesCanRunThroughBoundElfLoader")}
     elif suite == "cpp":
         required = {
+            "cpp-audit-semantic.CppPreprocessor.MapsBothPhysicalOutputEndingsAndFiltersSystemHeaders",
             "cpp-audit-semantic.CppAudit.PreventsActualNativeGpuHelperExecution",
             "cpp-audit-semantic.CppAudit.RejectsGpuDiscoveryBeforeParsingAndExpandsResponseOrder",
             "cpp-audit-semantic.CppAudit.DistinguishesSameNamedClassesAndBindsOutOfLineDefinition",

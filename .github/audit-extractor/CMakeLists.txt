@@ -21,20 +21,26 @@ find_package(topo-lang-cpp CONFIG REQUIRED)
 find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
 enable_testing()
+add_executable(topo-cpp-preprocessor-output-fixture
+    "${TOPO_CPP_SOURCE}/test/unit/CppPreprocessorOutputFixture.cpp")
+target_compile_features(topo-cpp-preprocessor-output-fixture PRIVATE cxx_std_17)
 add_executable(topo-cpp-audit-semantic-tests
     "${TOPO_CPP_SOURCE}/test/unit/CppAuditTest.cpp"
     "${TOPO_CPP_SOURCE}/test/unit/CppAuditDriverTest.cpp"
     "${TOPO_CPP_SOURCE}/topo-check/extractor/CppAuditDriver.cpp"
     "${TOPO_CPP_SOURCE}/topo-check/extractor/CppAuditExtractor.cpp")
 target_compile_features(topo-cpp-audit-semantic-tests PRIVATE cxx_std_17)
-target_compile_definitions(topo-cpp-audit-semantic-tests PRIVATE TOPO_CPP_AUDIT_LIBCLANG=1)
+target_compile_definitions(topo-cpp-audit-semantic-tests PRIVATE
+    TOPO_CPP_AUDIT_LIBCLANG=1
+    TOPO_CPP_PREPROCESSOR_OUTPUT_FIXTURE="$<TARGET_FILE:topo-cpp-preprocessor-output-fixture>")
 target_include_directories(topo-cpp-audit-semantic-tests PRIVATE
     "${TOPO_CPP_SOURCE}/topo-check" "${TOPO_CPP_SOURCE}/topo-check/extractor")
 target_include_directories(topo-cpp-audit-semantic-tests SYSTEM PRIVATE
     ${CLANG_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
 target_link_libraries(topo-cpp-audit-semantic-tests PRIVATE
     topo::lang-cpp::TopoCppAnalysis topo::core::TopoDistribution libclang clangDriver GTest::gtest_main)
-add_dependencies(topo-cpp-audit-semantic-tests topo-extract-cpp)
+add_dependencies(topo-cpp-audit-semantic-tests
+    topo-extract-cpp topo-cpp-preprocessor-output-fixture)
 add_custom_command(TARGET topo-cpp-audit-semantic-tests POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:topo-extract-cpp> $<TARGET_FILE_DIR:topo-cpp-audit-semantic-tests>)
