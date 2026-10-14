@@ -478,7 +478,9 @@ jobs:
         run: |
           git clone --depth 1 --branch "${TOPO_LLVM_REF}" \
               https://github.com/topo-lang/topo-llvm.git "${RUNNER_TEMP}/topo-llvm-src"
-          (cd "${RUNNER_TEMP}/topo-llvm-src" && bash scripts/setup-llvm.sh)
+          # ClangTargets.cmake validates exported helper executables as well
+          # as libraries; preserve them for the C++ extractor's Clang import.
+          (cd "${RUNNER_TEMP}/topo-llvm-src" && TOPO_LLVM_NO_TRIM=1 bash scripts/setup-llvm.sh)
           LLVM_ROOT="${RUNNER_TEMP}/topo-llvm-src/llvm-dev"
           echo "LLVM_DIR=${LLVM_ROOT}/lib/cmake/llvm"   >> "$GITHUB_ENV"
           echo "Clang_DIR=${LLVM_ROOT}/lib/cmake/clang" >> "$GITHUB_ENV"
