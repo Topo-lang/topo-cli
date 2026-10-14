@@ -107,9 +107,13 @@ jobs:
           evidence.mkdir(parents=True, exist_ok=True)
           (evidence / 'source-identities.json').write_text(json.dumps(rows, indent=2) + '\n')
           PY
-      - name: Enable MSVC environment
+      - name: Select the supported Windows MinGW toolchain
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        run: |
+          test -x /c/mingw64/bin/gcc.exe
+          test -x /c/mingw64/bin/g++.exe
+          echo 'C:/mingw64/bin' >> "$GITHUB_PATH"
+          /c/mingw64/bin/g++ --version
       - name: Install Linux build tools
         if: runner.os == 'Linux'
         run: |

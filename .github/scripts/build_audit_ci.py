@@ -55,6 +55,12 @@ def main():
     common = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
               f"-DCMAKE_INSTALL_PREFIX={prefix}",
               f"-DCMAKE_PREFIX_PATH={prefix};{args.prefix_path}", *args.cmake_option]
+    if args.platform == "Windows":
+        # Match the standalone core Windows lane and its runtime DLLs.
+        # GTest must use the same ABI instead of vcpkg's default MSVC triplet.
+        common += ["-DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe",
+                   "-DCMAKE_CXX_COMPILER=C:/mingw64/bin/g++.exe",
+                   "-DVCPKG_TARGET_TRIPLET=x64-mingw-static"]
     if args.toolchain:
         common += [f"-DCMAKE_TOOLCHAIN_FILE={args.toolchain.resolve()}",
                    f"-DVCPKG_MANIFEST_DIR={cli / '.github/audit-deps'}",

@@ -117,8 +117,8 @@ jobs:
           # core/cpp/rust dev); the key interpolates the refs, not their
           # content, so the pre-merge cache would keep serving fix-less
           # upstreams.
-          # v11-audit: require current audit APIs and language providers.
-          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v11-audit
+          # v12-java-ast: include the Java extractor required by init/check.
+          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v12-java-ast
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.topo-cache.outputs.cache-hit != 'true'
@@ -222,7 +222,10 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DTOPO_LANG_JAVA_BUILD_TESTS=OFF
+                -DTOPO_LANG_JAVA_BUILD_TESTS=OFF \
+                -DTOPO_LANG_JAVA_ENABLE_JVM_BACKEND=ON \
+                -DTOPO_GRADLE_JAVA_HOME="${JAVA_HOME}" \
+                -DTOPO_LANG_JAVA_GRADLE_ARGS="--no-daemon --console=plain"
           cmake --build "${RUNNER_TEMP}/topo-lang-java-build" --target install
 
       - name: Build & install topo-lang-python
@@ -373,8 +376,10 @@ jobs:
       - name: Init smoke (java / python / typescript) — init → check
         run: |
           CLI_BIN="${RUNNER_TEMP}/cli-install/bin"
+          UPSTREAM_BIN="${RUNNER_TEMP}/topo-install/bin"
           if [ "${RUNNER_OS}" = "Windows" ]; then
             CLI_BIN="$(cygpath -u "${CLI_BIN}")"
+            UPSTREAM_BIN="$(cygpath -u "${UPSTREAM_BIN}")"
             # Windows: the tools are MinGW-built (libstdc++-6 / libgcc_s_seh-1 /
             # libwinpthread-1). Strawberry Perl's stale runtime DLLs sit
             # earlier on PATH and shadow the build compiler's — the tools die
@@ -386,7 +391,8 @@ jobs:
               export PATH="$(cygpath -u "$(dirname "$cxx")"):${PATH}"
             fi
           fi
-          export PATH="${CLI_BIN}:${PATH}"
+          export PATH="${CLI_BIN}:${UPSTREAM_BIN}:${PATH}"
+          python test/smoke/init_analysis_failure.py
           TOPO_INIT_SMOKE_CHECK_ONLY=1 sh test/smoke/run-init-smoke.sh java python typescript
 
   # ── Integrated checker suite (topo-core/test/check) + full init smoke ────

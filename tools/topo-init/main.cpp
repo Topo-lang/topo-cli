@@ -81,16 +81,13 @@ int main(int argc, char* argv[]) {
             std::cerr << "  " << f << "\n";
     }
 
-    // Create extractor and extract symbols
-    // (C++ regex extractor; non-C++ languages will need LSP-based extraction)
-    if (cfg.language != topo::HostLanguage::Cpp && cfg.verbose) {
-        std::cerr << "warning: regex-based symbol extraction is only available for C++; "
-                     "non-C++ languages require LSP-based extraction\n";
-    }
+    // Keep the provider alive so extraction diagnostics remain available.
+    std::unique_ptr<topo::check::LanguageAnalysisProvider> provider;
     std::unique_ptr<topo::check::SymbolExtractor> extractor;
     auto* plugin = topo::lang::getPlugin(cfg.language);
     if (plugin) {
-        auto provider = plugin->createAnalysisProvider();
+        provider = plugin->createAnalysisProvider();
+        provider->configureAnalysis(cfg.projectDir, "");
         extractor = provider->createSymbolExtractor();
     }
     if (!extractor) {
@@ -98,6 +95,15 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     auto symbols = extractor->extractAll(sourceFiles);
+    bool analysisFailed = false;
+    for (const auto& diagnostic : provider->analysisDiagnostics()) {
+        if (!diagnostic.file.empty())
+            std::cerr << diagnostic.file << ":" << diagnostic.line << ": ";
+        const bool error = diagnostic.severity == topo::check::Severity::Error;
+        std::cerr << (error ? "Error: " : "Note: ") << diagnostic.message << '\n';
+        analysisFailed = analysisFailed || error;
+    }
+    if (analysisFailed) return 1;
 
     if (cfg.verbose) {
         std::cerr << "Extracted " << symbols.size() << " symbols\n";
