@@ -20,9 +20,9 @@
 #include <mach-o/dyld.h>
 #elif defined(__linux__)
 #include <link.h>
-extern char** environ;
+extern "C" char** environ;
 #elif !defined(_WIN32)
-extern char** environ;
+extern "C" char** environ;
 #endif
 #ifndef _WIN32
 #include <sys/stat.h>
