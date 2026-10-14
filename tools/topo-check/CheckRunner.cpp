@@ -604,7 +604,14 @@ bool CheckRunner::loadConfig() {
             includeDirs_=model.at("includeDirs").get<std::vector<std::string>>();
             for (auto& source : resolvedSources_) {
                 source=fs::canonical(fs::path(config_.projectDir)/source).string();
-                if (!fs::is_regular_file(source)) throw std::runtime_error("build source is not a file: " + source);
+                // Python and TypeScript backends accept directory source
+                // roots in ordinary builds. Audit and compiled-language
+                // models continue to require explicit source files.
+                const bool directorySource = !config_.audit &&
+                    (language_ == HostLanguage::Python || language_ == HostLanguage::TypeScript) &&
+                    fs::is_directory(source);
+                if (!fs::is_regular_file(source) && !directorySource)
+                    throw std::runtime_error("build source is not a file: " + source);
             }
         } catch (const std::exception& e) { std::cerr << "error: invalid resolved build model: " << e.what() << '\n'; return false; }
     }

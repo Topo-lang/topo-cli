@@ -540,7 +540,8 @@ int main(int argc, char* argv[]) {
     topo::platform::ensureLLVMLoaderPathForChildren();
 
     std::string backendCheckModel;
-    if (!cfg.evidenceMode.empty() || cfg.auditCheck) {
+    if (!cfg.evidenceMode.empty() || cfg.auditCheck ||
+        (cfg.language == topo::HostLanguage::Java && cfg.shouldRunCheck())) {
         try {
             const auto probe=topo::platform::runProcessCaptureWithTimeout(toolPath,{"--evidence-capabilities"},10000);
             if (probe.exitCode!=0 || probe.stdoutOutput.size()>65536)
@@ -587,8 +588,22 @@ int main(int argc, char* argv[]) {
         // This data model is a selected recipe; backend execution supplies the
         // separate command/build evidence.
         const auto checkModelPath = tempDir / "resolved-check-model.json";
+        auto checkSources = cfg.sources;
+        if (cfg.language == topo::HostLanguage::Java && !backendCheckModel.empty()) {
+            // Java accepts directory roots. The backend's model resolves the
+            // actual javac source set, including files selected from those roots.
+            try {
+                if (fs::file_size(backendCheckModel) > 4 * 1024 * 1024)
+                    throw std::runtime_error("Java check model exceeds limit");
+                std::ifstream input(backendCheckModel);
+                checkSources = nlohmann::json::parse(input).at("files").get<std::vector<std::string>>();
+            } catch (const std::exception& error) {
+                std::cerr << "error: invalid Java backend check model: " << error.what() << '\n';
+                return 1;
+            }
+        }
         nlohmann::json checkModel={{"schemaVersion",1},{"language",(cfg.language == topo::HostLanguage::Java ? "java" : cfg.language == topo::HostLanguage::Rust ? "rust" : cfg.language == topo::HostLanguage::Python ? "python" : cfg.language == topo::HostLanguage::TypeScript ? "typescript" : cfg.language == topo::HostLanguage::Mixed ? "mixed" : "cpp")},
-            {"topoRoot",fs::absolute(cfg.topoRoot).string()},{"sources",cfg.sources},{"includeDirs",cfg.includeDirs},
+            {"topoRoot",fs::absolute(cfg.topoRoot).string()},{"sources",checkSources},{"includeDirs",cfg.includeDirs},
             {"compiler",cfg.hostCompilerPath},{"standard",cfg.standard},{"cppFlags",cfg.cppFlags}};
         { std::ofstream stream(checkModelPath); stream << checkModel.dump(2); if (!stream) { std::cerr << "error: cannot write resolved check model\n"; return 1; } }
         std::cerr << "[3/7] Running topo-check...\n";

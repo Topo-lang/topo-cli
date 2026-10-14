@@ -393,6 +393,7 @@ jobs:
           fi
           export PATH="${CLI_BIN}:${UPSTREAM_BIN}:${PATH}"
           python test/smoke/init_analysis_failure.py
+          python test/smoke/build_model_sources.py
           TOPO_INIT_SMOKE_CHECK_ONLY=1 sh test/smoke/run-init-smoke.sh java python typescript
 
   # ── Integrated checker suite (topo-core/test/check) + full init smoke ────
@@ -530,8 +531,8 @@ jobs:
           # v5: topo-lang-rust + topo-llvm dev tips advanced again (Self
           # normalization + symbol-map/verifier follow-ups), and the cached
           # LLVM-scope artifacts showed a producer/reader skew — rotate.
-          # v6-audit: rebuild the audit-aware core, providers and Java backend.
-          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v6-audit
+          # v7-java-ast: include the extractor used by Java init/check/build.
+          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v7-java-ast
 
       # liblldb in the bundled LLVM (linked by topo-lang-cpp's
       # topo-debug-cpp at LLVM scope) needs libpython3.11, absent on
@@ -721,7 +722,10 @@ jobs:
                 -DCMAKE_INSTALL_PREFIX="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/topo-install" \
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-                -DTOPO_LANG_JAVA_BUILD_TESTS=OFF
+                -DTOPO_LANG_JAVA_BUILD_TESTS=OFF \
+                -DTOPO_LANG_JAVA_ENABLE_JVM_BACKEND=ON \
+                -DTOPO_GRADLE_JAVA_HOME="${JAVA_HOME}" \
+                -DTOPO_LANG_JAVA_GRADLE_ARGS="--no-daemon --console=plain"
           cmake --build "${RUNNER_TEMP}/topo-lang-java-build" --target install
 
       # topo-build-jvm-java backend for the java init→build smoke. Needs
