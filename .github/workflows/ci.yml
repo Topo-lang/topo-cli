@@ -60,6 +60,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Resolve immutable upstream source identities
+        run: python .github/scripts/ci_upstreams.py resolve --scope smoke
+
       - name: Install build deps (linux)
         if: runner.os == 'Linux'
         run: |
@@ -95,37 +98,13 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/topo-install
-          # v4: topo-core gained the BYO LLVM toolchain resolver
-          # (ensureLLVMLoaderPathForChildren, called by tools/topo-build/main.cpp);
-          # the upstream cache is keyed on the literal upstream refs, so bump to
-          # force a fresh topo-core rebuild that carries the new API.
-          # v5: topo-core IncrementalCache::saveManifest now returns bool (was
-          # void); tools/topo-build/main.cpp consumes the bool result, so the
-          # stale -v4 upstream install no longer compiles — bump to refetch.
-          # v6: topo-core gained the tpm AdapterSource API (TpmAdapterManifestRef
-          # + assembleAdapterRegistry's new tpmManifests param + TranspileRequest
-          # .tpmAdapterManifests), consumed by tools/topo-transpile/main.cpp's
-          # --tpm-adapters; the stale -v5 install lacks the new header API.
-          # v7: topo-core BuildConfig gained consumesDeclarationsForOptimization()
-          # (auto-check-when-optimizing), consumed by tools/topo-build/main.cpp's
-          # check=off warning; the stale -v6 install lacks the new method.
-          # v9: the prefix gains default-scope topo-lang-cpp / topo-lang-rust
-          # (plugin aggregators ungated upstream) and topo-core BuildConfig
-          # gained cppFlags, consumed by tools/topo-build/Config.cpp — the
-          # stale -v8 prefix lacks both.
-          # v10: the dev-pinned upstream tips advanced (fix batch merged to
-          # core/cpp/rust dev); the key interpolates the refs, not their
-          # content, so the pre-merge cache would keep serving fix-less
-          # upstreams.
-          # v12-java-ast: include the Java extractor required by init/check.
-          key: topo-cli-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v12-java-ast
+          # The digest binds every upstream repository to its resolved commit.
+          key: topo-cli-deps-${{ env.TOPO_UPSTREAM_CACHE_KEY }}-${{ matrix.os }}-${{ hashFiles('.github/workflows/ci.yml', '.github/scripts/ci_upstreams.py') }}-v13-source-shas
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.topo-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_CORE_REF}" \
-              https://github.com/topo-lang/topo-core.git \
-              "${RUNNER_TEMP}/topo-core-src"
+          python .github/scripts/ci_upstreams.py checkout topo-core "${RUNNER_TEMP}/topo-core-src"
           cmake -S "${RUNNER_TEMP}/topo-core-src" \
                 -B "${RUNNER_TEMP}/topo-core-build" \
                 -G Ninja \
@@ -138,9 +117,7 @@ jobs:
       - name: Build & install topo-lang
         if: steps.topo-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_REF}" \
-              https://github.com/topo-lang/topo-lang.git \
-              "${RUNNER_TEMP}/topo-lang-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang "${RUNNER_TEMP}/topo-lang-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-src" \
                 -B "${RUNNER_TEMP}/topo-lang-build" \
                 -G Ninja \
@@ -161,9 +138,7 @@ jobs:
       - name: Build & install topo-v8
         if: steps.topo-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_V8_REF}" \
-              https://github.com/topo-lang/topo-v8.git \
-              "${RUNNER_TEMP}/topo-v8-src"
+          python .github/scripts/ci_upstreams.py checkout topo-v8 "${RUNNER_TEMP}/topo-v8-src"
           cmake -S "${RUNNER_TEMP}/topo-v8-src" \
                 -B "${RUNNER_TEMP}/topo-v8-build" \
                 -G Ninja \
@@ -181,9 +156,7 @@ jobs:
       - name: Build & install topo-lang-cpp (default scope)
         if: steps.topo-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_CPP_REF}" \
-              https://github.com/topo-lang/topo-lang-cpp.git \
-              "${RUNNER_TEMP}/topo-lang-cpp-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-cpp "${RUNNER_TEMP}/topo-lang-cpp-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-cpp-src" \
                 -B "${RUNNER_TEMP}/topo-lang-cpp-build" \
                 -G Ninja \
@@ -196,9 +169,7 @@ jobs:
       - name: Build & install topo-lang-rust (default scope)
         if: steps.topo-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_RUST_REF}" \
-              https://github.com/topo-lang/topo-lang-rust.git \
-              "${RUNNER_TEMP}/topo-lang-rust-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-rust "${RUNNER_TEMP}/topo-lang-rust-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-rust-src" \
                 -B "${RUNNER_TEMP}/topo-lang-rust-build" \
                 -G Ninja \
@@ -212,9 +183,7 @@ jobs:
       - name: Build & install topo-lang-java
         if: steps.topo-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_JAVA_REF}" \
-              https://github.com/topo-lang/topo-lang-java.git \
-              "${RUNNER_TEMP}/topo-lang-java-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-java "${RUNNER_TEMP}/topo-lang-java-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-java-src" \
                 -B "${RUNNER_TEMP}/topo-lang-java-build" \
                 -G Ninja \
@@ -231,9 +200,7 @@ jobs:
       - name: Build & install topo-lang-python
         if: steps.topo-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_PYTHON_REF}" \
-              https://github.com/topo-lang/topo-lang-python.git \
-              "${RUNNER_TEMP}/topo-lang-python-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-python "${RUNNER_TEMP}/topo-lang-python-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-python-src" \
                 -B "${RUNNER_TEMP}/topo-lang-python-build" \
                 -G Ninja \
@@ -247,9 +214,7 @@ jobs:
       - name: Build & install topo-lang-typescript
         if: steps.topo-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_TYPESCRIPT_REF}" \
-              https://github.com/topo-lang/topo-lang-typescript.git \
-              "${RUNNER_TEMP}/topo-lang-typescript-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-typescript "${RUNNER_TEMP}/topo-lang-typescript-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-typescript-src" \
                 -B "${RUNNER_TEMP}/topo-lang-typescript-build" \
                 -G Ninja \
@@ -259,6 +224,12 @@ jobs:
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
                 -DTOPO_LANG_TYPESCRIPT_BUILD_TESTS=OFF
           cmake --build "${RUNNER_TEMP}/topo-lang-typescript-build" --target install
+
+      - name: Verify installed dependency source identities
+        run: |
+          python .github/scripts/ci_upstreams.py install-identity \
+            --prefix "${RUNNER_TEMP}/topo-install" \
+            --cache-hit "${{ steps.topo-cache.outputs.cache-hit }}"
 
       - name: Configure topo-cli
         run: |
@@ -397,6 +368,19 @@ jobs:
           TOPO_INIT_SMOKE_CHECK_ONLY=1 sh test/smoke/run-init-smoke.sh java python typescript
 
   # ── Integrated checker suite (topo-core/test/check) + full init smoke ────
+
+      - name: Upload dependency source identities
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: source-identities-smoke-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/topo-upstream-identities.json
+            ${{ runner.temp }}/topo-upstream-checkouts.json
+            ${{ runner.temp }}/topo-cli-source-identity.json
+            ${{ runner.temp }}/topo-install/upstream-source-identities.json
+
   # Builds topo-cli with ALL FIVE language plugins, runs the integrated
   # topo-check E2E suite (CheckRunner orchestration over real fixture
   # projects) against this repo's TopoCheckRunner, then runs the
@@ -458,6 +442,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Resolve immutable upstream source identities
+        run: python .github/scripts/ci_upstreams.py resolve --scope integrated
+
       - name: Install build deps (linux)
         if: runner.os == 'Linux'
         run: |
@@ -480,8 +467,7 @@ jobs:
       - name: Acquire bundled LLVM (linux)
         if: runner.os == 'Linux'
         run: |
-          git clone --depth 1 --branch "${TOPO_LLVM_REF}" \
-              https://github.com/topo-lang/topo-llvm.git "${RUNNER_TEMP}/topo-llvm-src"
+          python .github/scripts/ci_upstreams.py checkout topo-llvm "${RUNNER_TEMP}/topo-llvm-src"
           # ClangTargets.cmake validates exported helper executables as well
           # as libraries; preserve them for the C++ extractor's Clang import.
           (cd "${RUNNER_TEMP}/topo-llvm-src" && TOPO_LLVM_NO_TRIM=1 bash scripts/setup-llvm.sh)
@@ -516,26 +502,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/topo-install
-          # Distinct from build-and-smoke's topo-cli-deps-* cache: this
-          # prefix additionally carries topo-llvm (backend tools ON) +
-          # topo-lang-cpp / topo-lang-rust at LLVM scope (CppDriver /
-          # RustDriver for those tools) + topo-jvm (topo-build-jvm-java).
-          # Keyed on the literal upstream refs, so when an upstream API
-          # change breaks the cached install (or the suite in
-          # topo-core/test/check starts needing newer upstream behavior),
-          # bump the -vN suffix to force a rebuild — same convention as the
-          # build-and-smoke key above.
-          # v3: prefix contents changed — topo-llvm backend tools +
-          # topo-jvm joined for the init→build smoke, and the cached
-          # pre-ungate lang-cpp/rust installs lack the default-scope
-          # plugin aggregators.
-          # v4: dev-pinned upstream tips advanced (see the build-and-smoke
-          # key) — force the fresh clone.
-          # v5: topo-lang-rust + topo-llvm dev tips advanced again (Self
-          # normalization + symbol-map/verifier follow-ups), and the cached
-          # LLVM-scope artifacts showed a producer/reader skew — rotate.
-          # v7-java-ast: include the extractor used by Java init/check/build.
-          key: topo-cli-check-deps-core-${{ env.TOPO_CORE_REF }}-lang-${{ env.TOPO_LANG_REF }}-v8-${{ env.TOPO_V8_REF }}-llvm-${{ env.TOPO_LLVM_REF }}-jvm-${{ env.TOPO_JVM_REF }}-langcpp-${{ env.TOPO_LANG_CPP_REF }}-langrust-${{ env.TOPO_LANG_RUST_REF }}-langjava-${{ env.TOPO_LANG_JAVA_REF }}-langpy-${{ env.TOPO_LANG_PYTHON_REF }}-langts-${{ env.TOPO_LANG_TYPESCRIPT_REF }}-${{ matrix.os }}-v7-java-ast
+          # The digest binds every upstream repository to its resolved commit.
+          key: topo-cli-check-deps-${{ env.TOPO_UPSTREAM_CACHE_KEY }}-${{ matrix.os }}-${{ hashFiles('.github/workflows/ci.yml', '.github/scripts/ci_upstreams.py') }}-v8-source-shas
 
       # liblldb in the bundled LLVM (linked by topo-lang-cpp's
       # topo-debug-cpp at LLVM scope) needs libpython3.11, absent on
@@ -574,9 +542,7 @@ jobs:
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_CORE_REF}" \
-              https://github.com/topo-lang/topo-core.git \
-              "${RUNNER_TEMP}/topo-core-src"
+          python .github/scripts/ci_upstreams.py checkout topo-core "${RUNNER_TEMP}/topo-core-src"
           cmake -S "${RUNNER_TEMP}/topo-core-src" \
                 -B "${RUNNER_TEMP}/topo-core-build" \
                 -G Ninja \
@@ -590,9 +556,7 @@ jobs:
       - name: Build & install topo-lang
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_REF}" \
-              https://github.com/topo-lang/topo-lang.git \
-              "${RUNNER_TEMP}/topo-lang-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang "${RUNNER_TEMP}/topo-lang-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-src" \
                 -B "${RUNNER_TEMP}/topo-lang-build" \
                 -G Ninja \
@@ -615,9 +579,7 @@ jobs:
       - name: Build & install topo-v8
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_V8_REF}" \
-              https://github.com/topo-lang/topo-v8.git \
-              "${RUNNER_TEMP}/topo-v8-src"
+          python .github/scripts/ci_upstreams.py checkout topo-v8 "${RUNNER_TEMP}/topo-v8-src"
           cmake -S "${RUNNER_TEMP}/topo-v8-src" \
                 -B "${RUNNER_TEMP}/topo-v8-build" \
                 -G Ninja \
@@ -634,9 +596,7 @@ jobs:
       - name: Build & install topo-lang-cpp (default scope — runtime headers)
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_CPP_REF}" \
-              https://github.com/topo-lang/topo-lang-cpp.git \
-              "${RUNNER_TEMP}/topo-lang-cpp-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-cpp "${RUNNER_TEMP}/topo-lang-cpp-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-cpp-src" \
                 -B "${RUNNER_TEMP}/topo-lang-cpp-default-build" \
                 -G Ninja \
@@ -651,8 +611,7 @@ jobs:
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
           SRC="${RUNNER_TEMP}/topo-llvm-src"
-          [ -d "$SRC" ] || git clone --depth 1 --branch "${TOPO_LLVM_REF}" \
-              https://github.com/topo-lang/topo-llvm.git "$SRC"
+          python .github/scripts/ci_upstreams.py checkout topo-llvm "$SRC"
           LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
           cmake -S "$SRC" -B "${RUNNER_TEMP}/topo-llvm-core-build" -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
@@ -672,9 +631,7 @@ jobs:
       - name: Build & install topo-lang-rust (LLVM scope — RustDriver)
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_RUST_REF}" \
-              https://github.com/topo-lang/topo-lang-rust.git \
-              "${RUNNER_TEMP}/topo-lang-rust-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-rust "${RUNNER_TEMP}/topo-lang-rust-src"
           LLVM_ROOT="$(dirname "$(dirname "${LLVM_DIR}")")"
           cmake -S "${RUNNER_TEMP}/topo-lang-rust-src" \
                 -B "${RUNNER_TEMP}/topo-lang-rust-build" \
@@ -724,9 +681,7 @@ jobs:
       - name: Build & install topo-lang-java
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_JAVA_REF}" \
-              https://github.com/topo-lang/topo-lang-java.git \
-              "${RUNNER_TEMP}/topo-lang-java-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-java "${RUNNER_TEMP}/topo-lang-java-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-java-src" \
                 -B "${RUNNER_TEMP}/topo-lang-java-build" \
                 -G Ninja \
@@ -750,9 +705,7 @@ jobs:
       - name: Build & install topo-jvm (topo-build-jvm-java + transform jar)
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_JVM_REF}" \
-              https://github.com/topo-lang/topo-jvm.git \
-              "${RUNNER_TEMP}/topo-jvm-src"
+          python .github/scripts/ci_upstreams.py checkout topo-jvm "${RUNNER_TEMP}/topo-jvm-src"
           cmake -S "${RUNNER_TEMP}/topo-jvm-src" \
                 -B "${RUNNER_TEMP}/topo-jvm-build" \
                 -G Ninja \
@@ -769,9 +722,7 @@ jobs:
       - name: Build & install topo-lang-python
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_PYTHON_REF}" \
-              https://github.com/topo-lang/topo-lang-python.git \
-              "${RUNNER_TEMP}/topo-lang-python-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-python "${RUNNER_TEMP}/topo-lang-python-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-python-src" \
                 -B "${RUNNER_TEMP}/topo-lang-python-build" \
                 -G Ninja \
@@ -785,9 +736,7 @@ jobs:
       - name: Build & install topo-lang-typescript
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch "${TOPO_LANG_TYPESCRIPT_REF}" \
-              https://github.com/topo-lang/topo-lang-typescript.git \
-              "${RUNNER_TEMP}/topo-lang-typescript-src"
+          python .github/scripts/ci_upstreams.py checkout topo-lang-typescript "${RUNNER_TEMP}/topo-lang-typescript-src"
           cmake -S "${RUNNER_TEMP}/topo-lang-typescript-src" \
                 -B "${RUNNER_TEMP}/topo-lang-typescript-build" \
                 -G Ninja \
@@ -797,6 +746,12 @@ jobs:
                 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
                 -DTOPO_LANG_TYPESCRIPT_BUILD_TESTS=OFF
           cmake --build "${RUNNER_TEMP}/topo-lang-typescript-build" --target install
+
+      - name: Verify installed dependency source identities
+        run: |
+          python .github/scripts/ci_upstreams.py install-identity \
+            --prefix "${RUNNER_TEMP}/topo-install" \
+            --cache-hit "${{ steps.topo-check-cache.outputs.cache-hit }}"
 
       - name: Configure & build topo-cli (all five plugins)
         run: |
@@ -824,15 +779,10 @@ jobs:
       - name: Install topo-cli
         run: cmake --install build --prefix "${RUNNER_TEMP}/cli-install"
 
-      # On a cache hit the upstream clone steps were skipped; the suite
-      # sources are needed regardless. Standing caveat of the literal-"main"
-      # cache key: the cached prefix can lag the freshly cloned test
-      # sources — if the suite starts requiring newer upstream behavior,
-      # bump the cache key -vN suffix.
+      # Fetch test sources at the same commit as the verified installed prefix.
       - name: Fetch topo-core test sources
         run: |
-          [ -d "${RUNNER_TEMP}/topo-core-src" ] || git clone --depth 1 --branch "${TOPO_CORE_REF}" \
-              https://github.com/topo-lang/topo-core.git "${RUNNER_TEMP}/topo-core-src"
+          python .github/scripts/ci_upstreams.py checkout topo-core "${RUNNER_TEMP}/topo-core-src"
 
       - name: Configure & build the integrated checker suite (standalone topo-core/test/check)
         run: |
@@ -930,3 +880,15 @@ jobs:
           fi
           export PATH="${RUNNER_TEMP}/cli-install/bin:${RUNNER_TEMP}/topo-install/bin:${LLVM_BIN}:${PATH}"
           TOPO_INIT_SMOKE_REQUIRE_BUILD=1 sh test/smoke/run-init-smoke.sh
+
+      - name: Upload dependency source identities
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: source-identities-integrated-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/topo-upstream-identities.json
+            ${{ runner.temp }}/topo-upstream-checkouts.json
+            ${{ runner.temp }}/topo-cli-source-identity.json
+            ${{ runner.temp }}/topo-install/upstream-source-identities.json
