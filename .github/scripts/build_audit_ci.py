@@ -52,9 +52,13 @@ def main():
     prefix = work / "install"
     evidence = work / "evidence"
     evidence.mkdir(parents=True, exist_ok=True)
+    # Cache values can be expanded into generated CMake code (including
+    # vcpkg wrappers), where native Windows backslashes become escapes.
+    prefix_path = ";".join(Path(item).as_posix() if item else ""
+                           for item in args.prefix_path.split(";"))
     common = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
-              f"-DCMAKE_INSTALL_PREFIX={prefix}",
-              f"-DCMAKE_PREFIX_PATH={prefix};{args.prefix_path}", *args.cmake_option]
+              f"-DCMAKE_INSTALL_PREFIX={prefix.as_posix()}",
+              f"-DCMAKE_PREFIX_PATH={prefix.as_posix()};{prefix_path}", *args.cmake_option]
     if args.platform == "Windows":
         # Match the standalone core Windows lane and its runtime DLLs.
         # GTest must use the same ABI instead of vcpkg's default MSVC triplet.
@@ -62,9 +66,9 @@ def main():
                    "-DCMAKE_CXX_COMPILER=C:/mingw64/bin/g++.exe",
                    "-DVCPKG_TARGET_TRIPLET=x64-mingw-static"]
     if args.toolchain:
-        common += [f"-DCMAKE_TOOLCHAIN_FILE={args.toolchain.resolve()}",
-                   f"-DVCPKG_MANIFEST_DIR={cli / '.github/audit-deps'}",
-                   f"-DVCPKG_INSTALLED_DIR={work / 'vcpkg_installed'}"]
+        common += [f"-DCMAKE_TOOLCHAIN_FILE={args.toolchain.resolve().as_posix()}",
+                   f"-DVCPKG_MANIFEST_DIR={(cli / '.github/audit-deps').as_posix()}",
+                   f"-DVCPKG_INSTALLED_DIR={(work / 'vcpkg_installed').as_posix()}"]
 
     def configure(name, *options, source=None):
         execute(["cmake", "-S", source or sources / name, "-B", work / name,
@@ -88,7 +92,7 @@ def main():
         if "TOPO_ENABLE_EXPERIMENTAL_LINUX_ANALYSIS:BOOL=OFF" not in cache:
             raise RuntimeError("The Linux experimental backend must default to OFF")
     build("topo-core", "install")
-    configure("core-tests", f"-DTOPO_CORE_SOURCE={sources / 'topo-core'}",
+    configure("core-tests", f"-DTOPO_CORE_SOURCE={(sources / 'topo-core').as_posix()}",
               source=cli / ".github/audit-core")
     build("core-tests", "topo-audit-contract-tests", "topo-analysis-process-tests")
     test("core-tests", "linux-default" if args.platform == "Linux" else "core")
@@ -98,7 +102,7 @@ def main():
         configure("topo-core", "-DTOPO_CORE_BUILD_TESTS=OFF",
                   "-DTOPO_ENABLE_EXPERIMENTAL_LINUX_ANALYSIS=ON")
         build("topo-core", "install")
-        configure("core-tests", f"-DTOPO_CORE_SOURCE={sources / 'topo-core'}",
+        configure("core-tests", f"-DTOPO_CORE_SOURCE={(sources / 'topo-core').as_posix()}",
                   source=cli / ".github/audit-core")
         build("core-tests", "topo-audit-contract-tests", "topo-analysis-process-tests")
         # Even this opt-in build must refuse the official exact-executable
@@ -121,12 +125,12 @@ def main():
     java_home = Path(os.environ["JAVA_HOME"]).resolve(strict=True)
     configure("topo-lang-java", "-DTOPO_LANG_JAVA_BUILD_TESTS=OFF",
               "-DTOPO_LANG_JAVA_ENABLE_JVM_BACKEND=ON",
-              f"-DTOPO_GRADLE_JAVA_HOME={java_home}",
+              f"-DTOPO_GRADLE_JAVA_HOME={java_home.as_posix()}",
               "-DTOPO_LANG_JAVA_GRADLE_ARGS=--no-daemon --console=plain")
     build("topo-lang-java", "install")
     configure("topo-jvm", "-DTOPO_JVM_BUILD_TESTS=OFF", "-DTOPO_JVM_BUILD_E2E=OFF",
               "-DTOPO_JVM_BUILD_TOOLS=ON", "-DTOPO_JVM_BUILD_TRANSFORM=ON",
-              "-DTOPO_JVM_BUILD_DECOMPILE=OFF", f"-DTOPO_GRADLE_JAVA_HOME={java_home}",
+              "-DTOPO_JVM_BUILD_DECOMPILE=OFF", f"-DTOPO_GRADLE_JAVA_HOME={java_home.as_posix()}",
               "-DTOPO_JVM_GRADLE_ARGS=--no-daemon --console=plain")
     build("topo-jvm", "install")
     # The backend locates its runtime and transformer beside its executable.
@@ -134,22 +138,22 @@ def main():
     shutil.copy2(prefix / "share/topo-jvm/lib/topo-transform.jar", prefix / "bin/topo-transform.jar")
 
     llvm = Path(os.environ["TOPO_AUDIT_LLVM_ROOT"]).resolve(strict=True)
-    configure("extractor", f"-DTOPO_CPP_SOURCE={sources / 'topo-lang-cpp'}",
-              f"-DLLVM_DIR={llvm / 'lib/cmake/llvm'}",
-              f"-DClang_DIR={llvm / 'lib/cmake/clang'}",
+    configure("extractor", f"-DTOPO_CPP_SOURCE={(sources / 'topo-lang-cpp').as_posix()}",
+              f"-DLLVM_DIR={(llvm / 'lib/cmake/llvm').as_posix()}",
+              f"-DClang_DIR={(llvm / 'lib/cmake/clang').as_posix()}",
               source=cli / ".github/audit-extractor")
     build("extractor", "topo-extract-cpp", "topo-cpp-audit-semantic-tests")
     test("extractor", "cpp")
     extractor = work / "extractor/extractor/topo-extract-cpp"
     configure("topo-cli", "-DTOPO_CLI_BUILD_TESTS=ON", "-DTOPO_CLI_REQUIRE_AUDIT_TESTS=ON",
-              f"-DPython3_EXECUTABLE={sys.executable}",
+              f"-DPython3_EXECUTABLE={Path(sys.executable).as_posix()}",
               "-DTOPO_CLI_ENABLE_PROFILE=OFF", "-DTOPO_CLI_ENABLE_RUST_PLUGIN=OFF",
               "-DTOPO_CLI_ENABLE_PYTHON_PLUGIN=OFF", "-DTOPO_CLI_ENABLE_TYPESCRIPT_PLUGIN=OFF",
-              f"-DTOPO_AUDIT_CPP_EXTRACTOR={extractor}",
-              f"-DTOPO_AUDIT_TEST_CLANG={llvm / 'bin/clang++'}",
-              f"-DTOPO_AUDIT_JAVA_EXTRACTOR_DIR={prefix / 'bin'}",
-              f"-DTOPO_AUDIT_JAVA_BACKEND={prefix / 'bin/topo-build-jvm-java'}",
-              f"-DTOPO_GRADLE_JAVA_HOME={java_home}", source=cli)
+              f"-DTOPO_AUDIT_CPP_EXTRACTOR={extractor.as_posix()}",
+              f"-DTOPO_AUDIT_TEST_CLANG={(llvm / 'bin/clang++').as_posix()}",
+              f"-DTOPO_AUDIT_JAVA_EXTRACTOR_DIR={(prefix / 'bin').as_posix()}",
+              f"-DTOPO_AUDIT_JAVA_BACKEND={(prefix / 'bin/topo-build-jvm-java').as_posix()}",
+              f"-DTOPO_GRADLE_JAVA_HOME={java_home.as_posix()}", source=cli)
     build("topo-cli", "topo-check", "topo-build", "topo-audit-support-tests")
     try:
         test("topo-cli", "cli")

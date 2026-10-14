@@ -445,6 +445,9 @@ jobs:
   integrated-check:
     name: integrated check suite (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      # This release emits LLVM 22 bitcode for the LLVM 22 backend reader.
+      RUSTUP_TOOLCHAIN: '1.98.0'
     defaults:
       run:
         shell: bash
@@ -545,19 +548,28 @@ jobs:
           sudo add-apt-repository -y ppa:deadsnakes/ppa
           sudo apt-get update -qq && sudo apt-get install -y -qq libpython3.11
 
-      # cargo is needed on EVERY run, not just cache-miss builds: the rust
-      # leg of the init→build smoke compiles its scaffolded crate at smoke
-      # runtime (and the cache-miss lang-rust LLVM scope builds
-      # topo-extract-rust via cargo). Runner images usually ship Rust, but
-      # that is not guaranteed across image updates — bootstrap a minimal
-      # toolchain when absent.
-      - name: Ensure Rust toolchain (smoke runtime + extractor build)
+      # The smoke emits Rust bitcode on every run. Runner updates can move
+      # rustc to a newer LLVM major (Rust 1.99 emits LLVM 23), which the
+      # LLVM 22 backend cannot read. Pin both platforms to a matching major.
+      - name: Install and verify Rust toolchain (LLVM 22 bitcode)
         run: |
-          if ! command -v cargo >/dev/null 2>&1; then
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          if ! command -v rustup >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain stable
+              | sh -s -- -y --profile minimal --default-toolchain none
           fi
-          [ -d "${HOME}/.cargo/bin" ] && echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH" || true
+          rustup toolchain install "${RUSTUP_TOOLCHAIN}" --profile minimal
+          echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+          rustc --version --verbose
+          cargo --version
+          LLVM_BIN="$(dirname "$(dirname "$(dirname "${LLVM_DIR}")")")/bin"
+          reader_version="$("${LLVM_BIN}/llvm-config" --version)"
+          rust_llvm_major="$(rustc --version --verbose | awk '/^LLVM version:/ {split($3, v, "."); print v[1]}')"
+          echo "LLVM reader version: ${reader_version}"
+          if [ -z "${rust_llvm_major}" ] || [ "${rust_llvm_major}" != "${reader_version%%.*}" ]; then
+            echo "::error::Rust bitcode producer LLVM ${rust_llvm_major} does not match reader ${reader_version}"
+            exit 1
+          fi
 
       - name: Build & install topo-core (zero-LLVM, lang-less)
         if: steps.topo-check-cache.outputs.cache-hit != 'true'
