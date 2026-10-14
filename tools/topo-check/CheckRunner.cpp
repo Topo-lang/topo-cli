@@ -4,6 +4,8 @@
 // completeness, containment, import-path.
 
 #include "CheckRunner.h"
+#include "AuditSupport.h"
+#include "topo/Distribution/Sha256.h"
 #include "MixedAnalysisProvider.h"
 
 #include "topo/Basic/Diagnostic.h"
@@ -235,7 +237,7 @@ std::vector<std::string> CheckRunner::discoverRelevantFiles() const {
 bool CheckRunner::tryCacheHit(int& cachedResult) {
     // Java binding facts depend on external jars, generated sources and class
     // directories. Source-only cache entries cannot certify those inputs.
-    if (language_ == HostLanguage::Java) return false;
+    if (config_.audit || !config_.buildModelPath.empty() || language_ == HostLanguage::Java) return false;
     // Only cache for default configuration (all checks, no filter)
     if (config_.checkName != "all" || !config_.filter.empty()) return false;
 
@@ -484,6 +486,23 @@ bool CheckRunner::loadConfig() {
     }
 
     const auto& tbl = tomlResult.table();
+    config_.audit = config_.audit || tbl.at_path("check.audit.enabled").value_or(false);
+    if (config_.auditPolicyPath.empty()) {
+        if (auto p = tbl.at_path("check.audit.policy").value<std::string>())
+            config_.auditPolicyPath = (fs::path(config_.projectDir) / *p).string();
+        else if (fs::exists(fs::path(config_.projectDir) / "Topo.audit.toml"))
+            config_.auditPolicyPath = (fs::path(config_.projectDir) / "Topo.audit.toml").string();
+    }
+    if (config_.audit) {
+        if (config_.listUnsafe || config_.checkName != "all" || !config_.filter.empty()) {
+            std::cerr << "error: audit requires every check and no name filter\n"; return false;
+        }
+        for (const char* key : {"containment.mode", "purity.mode", "visibility.mode", "stage_isolation.mode"}) {
+            if (tbl.at_path(key).value_or(std::string()) == "off") {
+                std::cerr << "error: audit cannot disable " << key << '\n'; return false;
+            }
+        }
+    }
 
     // [topo].root
     if (auto v = tbl.at_path("topo.root").value<std::string>()) {
@@ -494,13 +513,33 @@ bool CheckRunner::loadConfig() {
     }
 
     // [build].language
+    if (config_.audit) {
+        const auto selected=tbl.at_path("build.language").value<std::string>();
+        const std::set<std::string> known={"cpp","rust","java","python","typescript","mixed"};
+        if (!selected || !known.count(*selected)) { std::cerr << "error: audit requires an explicit supported build.language\n"; return false; }
+    }
     if (auto v = tbl.at_path("build.language").value<std::string>()) {
         language_ = parseHostLanguage(*v);
     }
 
+    if (config_.cppProjectPath.empty()) {
+        if (auto v=tbl.at_path("check.cpp_project").value<std::string>()) config_.cppProjectPath=(fs::path(config_.projectDir) / *v).string();
+        else if (config_.audit && language_ == HostLanguage::Cpp) {
+            for (const char* candidate : {"build/compile_commands.json","compile_commands.json"}) {
+                auto path=fs::path(config_.projectDir)/candidate;
+                if (fs::is_regular_file(path)) { config_.cppProjectPath=path.string(); break; }
+            }
+        }
+    }
     if (config_.javaProjectPath.empty()) {
         if (auto v = tbl.at_path("check.java_project").value<std::string>())
             config_.javaProjectPath = (fs::path(config_.projectDir) / *v).string();
+    }
+    if (config_.audit && config_.javaProjectPath.empty() && language_==HostLanguage::Java) {
+        for (const char* candidate : {".topo/java-project.json","build/topo-java-project.json"}) {
+            auto path=fs::path(config_.projectDir)/candidate;
+            if (fs::is_regular_file(path)) { config_.javaProjectPath=path.string(); break; }
+        }
     }
     if (!config_.javaProjectPath.empty() && language_ != HostLanguage::Java) {
         std::cerr << "error: java_project requires build.language = java\n";
@@ -549,6 +588,25 @@ bool CheckRunner::loadConfig() {
         if (auto m = tbl.at_path("build.rust.manifest").value<std::string>()) {
             rustCrateDir = (fs::path(config_.projectDir) / *m).parent_path().string();
         }
+    }
+
+    if (!config_.buildModelPath.empty()) {
+        try {
+            if (fs::file_size(config_.buildModelPath)>4*1024*1024) throw std::runtime_error("build model exceeds limit");
+            std::ifstream in(config_.buildModelPath);
+            const auto model=nlohmann::json::parse(in);
+            const auto modelLanguage=model.at("language").get<std::string>();
+            const std::set<std::string> knownLanguages={"cpp","rust","java","python","typescript","mixed"};
+            if (model.at("schemaVersion")!=1 || !knownLanguages.count(modelLanguage) || parseHostLanguage(modelLanguage)!=language_)
+                throw std::runtime_error("build model version/language mismatch");
+            topoRoot_=model.at("topoRoot").get<std::string>();
+            resolvedSources_=model.at("sources").get<std::vector<std::string>>();
+            includeDirs_=model.at("includeDirs").get<std::vector<std::string>>();
+            for (auto& source : resolvedSources_) {
+                source=fs::canonical(fs::path(config_.projectDir)/source).string();
+                if (!fs::is_regular_file(source)) throw std::runtime_error("build source is not a file: " + source);
+            }
+        } catch (const std::exception& e) { std::cerr << "error: invalid resolved build model: " << e.what() << '\n'; return false; }
     }
 
     // [completeness] config
@@ -606,6 +664,19 @@ bool CheckRunner::loadConfig() {
         }
     }
 
+    if (config_.audit) {
+        containmentCfg_.mode = purityCfg_.mode = visibilityCfg_.mode = stageIsolationCfg_.mode = FeatureMode::Force;
+        containmentCfg_.strictIdentity = true;
+        if (config_.deepMode) {
+            std::cerr << "error: audit uses bounded semantic extractors; LSP deep sessions have no audit execution policy\n";
+            return false;
+        }
+        if (!completenessCfg_.ignorePatterns.empty() || completenessCfg_.ignoreConstructors || completenessCfg_.ignoreDestructors) {
+            std::cerr << "error: audit requires explicit manual boundaries instead of completeness ignore rules\n";
+            return false;
+        }
+    }
+
     // Create language-specific analysis provider via plugin registry.
     // Mixed has no plugin of its own — it composes the cpp and rust
     // providers, so both plugins must be linked in; name the missing
@@ -644,7 +715,40 @@ bool CheckRunner::loadConfig() {
         }
         config_.javaProjectPath = absolute.lexically_normal().string();
     }
-    provider_->configureAnalysis(config_.projectDir, config_.javaProjectPath);
+    if (config_.audit) {
+        std::string diagnostic;
+        if (!provider_->configureAuditExecution({config_.analysisInputRoots}, diagnostic)) {
+            std::cerr << "error: audit execution unsupported: " << diagnostic << "\n";
+            return false;
+        }
+    }
+    bool restoredAuditFacts = false;
+    const auto& projectModel = language_ == HostLanguage::Cpp ? config_.cppProjectPath : config_.javaProjectPath;
+    if (config_.audit) {
+        auditCacheStatus_ = auditCacheEnabled(config_) ? "bypass" : "disabled";
+        try {
+            auto identity = provider_->auditCacheIdentity(config_.projectDir, projectModel);
+            if (identity.value("supported", false)) {
+                auto inputs = discoverRelevantFiles();
+                inputs.erase(std::remove_if(inputs.begin(), inputs.end(), [](const std::string& path) {
+                    return fs::path(path).extension() != ".topo" && fs::path(path).filename() != "Topo.toml";
+                }), inputs.end());
+                for (const auto& path : {config_.auditPolicyPath, config_.buildModelPath, config_.nativeEvidencePath})
+                    if (!path.empty()) inputs.push_back(path);
+                auditCacheIdentity_ = {{"provider", identity}, {"context", auditCacheContext(config_, inputs)}};
+                if (auditCacheEnabled(config_)) {
+                    nlohmann::json payload;
+                    if (loadAuditFactsCache(config_, auditCacheIdentity_, payload, auditCacheReason_)) {
+                        restoredAuditFacts = provider_->importAuditCache(payload);
+                        if (!restoredAuditFacts) auditCacheReason_ = "provider rejected cached facts";
+                    }
+                    auditCacheStatus_ = restoredAuditFacts ? "hit" : "miss";
+                }
+            } else auditCacheReason_ = identity.value("reason", "provider cache identity unavailable");
+        } catch (const std::exception& error) { auditCacheReason_ = error.what(); }
+    }
+    if (!restoredAuditFacts) provider_->configureAnalysis(config_.projectDir, projectModel);
+    provider_->configureNativeEvidence(config_.nativeEvidencePath,config_.evidenceRoots);
 
     if (config_.verbose) {
         const char* langStr = language_ == HostLanguage::Rust   ? "rust"
@@ -737,6 +841,7 @@ bool CheckRunner::runFrontend() {
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> CheckRunner::collectSourceFiles() const {
+    if (!config_.buildModelPath.empty() && (language_==HostLanguage::Cpp || language_==HostLanguage::Java)) return resolvedSources_;
     return provider_->collectSourceFiles(config_.projectDir, includeDirs_);
 }
 
@@ -987,7 +1092,7 @@ check::CheckResult CheckRunner::runContainment() {
             sym.kind == check::HostSymbolKind::Method ||
             sym.kind == check::HostSymbolKind::StaticMethod) {
             check::DetectedCallSite presence;
-            presence.callerQualifiedName = sym.simpleName;
+            presence.callerQualifiedName = sym.qualifiedName;
             presence.calleePattern = "";
             presence.unsafeLevel = check::UnsafeLevel::Safe;
             presence.file = sym.file;
@@ -996,6 +1101,14 @@ check::CheckResult CheckRunner::runContainment() {
         }
     }
 
+    if (config_.audit) {
+        imports.erase(std::remove_if(imports.begin(), imports.end(), [&](const auto& i) {
+            return isAuditManual("", i.file);
+        }), imports.end());
+        callSites.erase(std::remove_if(callSites.begin(), callSites.end(), [&](const auto& i) {
+            return !i.calleePattern.empty() && isAuditManual(i.callerQualifiedName, i.file);
+        }), callSites.end());
+    }
     check::checkContainment(symbols_, imports, callSites, containmentCfg_, result,
                             provider_->separator());
     return result;
@@ -1061,6 +1174,9 @@ check::CheckResult CheckRunner::runPurity() {
         }
     }
 
+    if (config_.audit) accesses.erase(std::remove_if(accesses.begin(), accesses.end(), [&](const auto& i) {
+        return isAuditManual(i.function,i.file);
+    }), accesses.end());
     check::checkPurity(symbols_, accesses, result);
     return result;
 }
@@ -1113,6 +1229,9 @@ check::CheckResult CheckRunner::runVisibility() {
         }
     }
 
+    if (config_.audit) edges.erase(std::remove_if(edges.begin(), edges.end(), [&](const auto& i) {
+        return isAuditManual(i.caller,i.file);
+    }), edges.end());
     check::checkVisibilityConsistency(symbols_, visEntries_, edges, result);
     return result;
 }
@@ -1165,6 +1284,9 @@ check::CheckResult CheckRunner::runStageIsolation() {
         }
     }
 
+    if (config_.audit) edges.erase(std::remove_if(edges.begin(), edges.end(), [&](const auto& i) {
+        return isAuditManual(i.caller,i.file);
+    }), edges.end());
     check::checkStageIsolation(symbols_, edges, result);
     return result;
 }
@@ -1230,6 +1352,14 @@ void CheckRunner::reportResultJson(const std::string& checkName, const check::Ch
 // run — orchestrate all checks
 // ---------------------------------------------------------------------------
 
+bool CheckRunner::isAuditManual(const std::string& name, const std::string& file) const {
+    if (!config_.audit) return false;
+    if (file.empty()) return false;
+    const auto path = fs::canonical(file).generic_string();
+    if (std::find(auditManualMembers_.begin(),auditManualMembers_.end(),std::make_pair(name,path)) != auditManualMembers_.end()) return true;
+    return std::find(auditManualFiles_.begin(),auditManualFiles_.end(),path) != auditManualFiles_.end();
+}
+
 int CheckRunner::run() {
     // Incremental: check cache before expensive work
     int cachedResult = -1;
@@ -1285,11 +1415,54 @@ int CheckRunner::run() {
         }
     }
 
-    bool anyErrors = false;
+    nlohmann::json auditReport;
+    if (config_.audit) {
+        auto sources = collectSourceFiles();
+        auto facts = provider_->auditFacts(sources);
+        if (!auditCacheIdentity_.is_null()) {
+            // Bind approvals to the same producer and runtime bytes as reuse.
+            // These are analysis inputs; cached policy or approvals never enter
+            // the report construction below.
+            for (const auto* part : {"provider", "context"})
+                for (const auto& [path, input] : auditCacheIdentity_.at(part).at("inputs").items()) {
+                    facts.inputs.push_back(path);
+                    facts.inputDigests[path] = input.at("sha256").get<std::string>();
+                }
+            facts.buildVariant = dist::sha256Hex(nlohmann::json{{"variant", facts.buildVariant},
+                {"providerIdentity", auditCacheIdentity_.at("provider")},
+                {"analysisInputRoots", config_.analysisInputRoots}}.dump());
+        }
+        auto policy = loadAuditPolicy(config_.auditPolicyPath);
+        std::vector<std::string> externalTypes;
+        for (const auto& [name, type] : symbols_.classSymbols())
+            if (type.isExternal && (type.externalOwner.empty() || type.externalOwner == name)) externalTypes.push_back(name);
+        for (const auto& [name, fn] : symbols_.functions())
+            if (fn.isExternal && fn.externalOwner.empty()) policy.manual.push_back({"function",name,""});
+        std::sort(externalTypes.begin(),externalTypes.end());
+        auto inputs = discoverRelevantFiles();
+        if (!config_.nativeEvidencePath.empty()) inputs.push_back(config_.nativeEvidencePath);
+        if (!config_.buildModelPath.empty()) inputs.push_back(config_.buildModelPath);
+        if (!config_.auditPolicyPath.empty()) inputs.push_back(config_.auditPolicyPath);
+        auditReport = check::makeAuditReport(config_.projectDir, facts, policy, externalTypes, sources, inputs);
+        for (const auto& boundary : auditReport.at("manual")) {
+            if (boundary.at("kind") == "class") {
+                if (!symbols_.markExternalType(boundary.at("name").get<std::string>()))
+                    auditReport["unresolved"].push_back("manual class has no compatible .topo interface: " + boundary.at("name").get<std::string>());
+            }
+            if (boundary.at("kind") == "file") auditManualFiles_.push_back(fs::canonical(boundary.at("file").get<std::string>()).generic_string());
+            for (const auto& member : boundary.at("members"))
+                auditManualMembers_.emplace_back(member.at("name").get<std::string>(),
+                    fs::canonical(member.at("file").get<std::string>()).generic_string());
+        }
+        for (const auto& file : sources) if (isAuditManual("",file)) completenessCfg_.manualFiles.push_back(file);
+        check::applyAuditTrust(auditReport, loadAuditTrust(config_));
+    }
+    bool anyErrors = config_.audit && !auditReport.value("passed",false);
     lastResults_.clear();
     std::vector<std::pair<std::string, check::CheckResult>> results;
 
     auto shouldRun = [&](const std::string& name) {
+        if (config_.audit && !auditReport.value("supported",false)) return false;
         if (!matchesFilter(name)) return false;
         return config_.checkName == "all" || config_.checkName == name;
     };
@@ -1334,6 +1507,40 @@ int CheckRunner::run() {
                            std::move(analysis)});
     }
 
+    if (config_.audit) {
+        if (!auditCacheIdentity_.is_null()) {
+            try {
+                const auto& model = language_ == HostLanguage::Cpp ? config_.cppProjectPath : config_.javaProjectPath;
+                auto inputs = discoverRelevantFiles();
+                inputs.erase(std::remove_if(inputs.begin(), inputs.end(), [](const std::string& path) {
+                    return fs::path(path).extension() != ".topo" && fs::path(path).filename() != "Topo.toml";
+                }), inputs.end());
+                for (const auto& path : {config_.auditPolicyPath, config_.buildModelPath, config_.nativeEvidencePath})
+                    if (!path.empty()) inputs.push_back(path);
+                const nlohmann::json current = {{"provider", provider_->auditCacheIdentity(config_.projectDir, model)},
+                    {"context", auditCacheContext(config_, inputs)}};
+                if (current == auditCacheIdentity_) {
+                    if (auditCacheStatus_ == "miss" && saveAuditFactsCache(config_, current, provider_->exportAuditCache(), auditCacheReason_))
+                        auditCacheReason_ = "fresh analysis facts stored";
+                } else throw std::runtime_error("analysis input identity changed during audit");
+            } catch (const std::exception& error) {
+                auditCacheReason_ = error.what();
+                auditReport["unresolved"].push_back(auditCacheReason_);
+                auditReport["analysisComplete"] = false;
+                auditReport["reviewKey"] = check::auditReviewKey(auditReport);
+                anyErrors = true;
+            }
+        }
+        std::string error;
+        if (!check::verifyAuditSnapshot(auditReport,error)) { auditReport["unresolved"].push_back(error); anyErrors = true; }
+        check::applyAuditTrust(auditReport, loadAuditTrust(config_));
+        auditReport["declarationsPassed"] = auditReport.value("supported",false) && std::all_of(results.begin(),results.end(),[](const auto& r) { return r.second.passed(); });
+        auditReport["passed"] = auditReport.value("passed",false) && auditReport.value("declarationsPassed",false);
+        if (!auditReport.value("passed",false)) anyErrors = true;
+        auditReport["factsCache"] = {{"status", auditCacheStatus_}, {"reason", auditCacheReason_}};
+        if (config_.verbose) std::cerr << "topo-check: audit facts cache " << auditCacheStatus_ << ": " << auditCacheReason_ << '\n';
+        saveAuditReport(config_.auditReportPath,auditReport);
+    }
     // Store results for programmatic access
     lastResults_ = results;
 
@@ -1376,6 +1583,7 @@ int CheckRunner::run() {
             checksArr.push_back(std::move(checkObj));
         }
         output["checks"] = std::move(checksArr);
+        if (config_.audit) output["audit"] = auditReport;
 
         std::cout << output.dump(2) << "\n";
     } else {
@@ -1416,6 +1624,20 @@ int CheckRunner::run() {
             break;
         }
 
+        if (config_.audit) {
+            std::cout << "\nAudit evidence: " << auditReport.value("evidenceLevel", "model")
+                      << "; manual approval: " << auditReport.value("manualApproval", "pending") << '\n';
+            for (const auto& item : auditReport["manual"])
+                std::cout << "  Review " << item.at("kind").get<std::string>() << ' ' << item.at("name").get<std::string>()
+                          << " (" << item.at("file").get<std::string>() << ")\n";
+            for (const auto& item : auditReport["dependencies"]) {
+                auto label = item.at("path").get<std::string>();
+                if (label.empty()) label = item.at("id").get<std::string>();
+                std::cout << "  " << item.at("analysis").get<std::string>() << ": " << label
+                          << " [" << item.at("approval").get<std::string>() << "]\n";
+            }
+            for (const auto& reason : auditReport["unresolved"]) std::cout << "  Unresolved: " << reason.get<std::string>() << '\n';
+        }
         int totalErrors = 0, totalWarnings = 0;
         for (const auto& [name, res] : results) {
             totalErrors += res.errorCount;
@@ -1433,7 +1655,7 @@ int CheckRunner::run() {
     if (provider_) provider_->shutdownLSP();
 
     int result = anyErrors ? 1 : 0;
-    saveCheckCache(result);
+    if (!config_.audit) saveCheckCache(result);
     return result;
 }
 

@@ -31,6 +31,7 @@
 #include "topo/Basic/Diagnostic.h"
 #include "topo/Build/BackendProtocol.h"
 #include "topo/Build/IncrementalCache.h"
+#include "topo/Distribution/Sha256.h"
 #include "topo/Debug/Emitter.h"
 #include "topo/Sema/VisibilityCollector.h"
 #include "topo/Lexer/Lexer.h"
@@ -39,6 +40,7 @@
 #include "topo/Platform/Process.h"
 #include "topo/Platform/SharedLibrary.h"
 #include "topo/Platform/TempFile.h"
+#include "topo/Platform/FileLock.h"
 #include "topo/Platform/ToolResolution.h"
 #include "topo/Analysis/LifetimeAnalysis.h"
 #include "topo/Sema/ImportResolver.h"
@@ -121,6 +123,19 @@ int main(int argc, char* argv[]) {
     if (!hasToml && fs::exists(fs::current_path() / "Topo.toml")) {
         return 1;
     }
+    if (!cfg.evidenceMode.empty() || cfg.auditCheck) {
+        // Retain the exact request and intermediate bytes referenced by
+        // evidence; ordinary cache records do not establish their origin.
+        cfg.keepTemps = true;
+        cfg.noIncremental = true;
+    }
+    if ((!cfg.auditNativeEvidence.empty() || !cfg.auditEvidenceRoots.empty()) &&
+        (!cfg.auditCheck || cfg.language != topo::HostLanguage::Java)) {
+        std::cerr << "error: native evidence requires a Java --audit build\n"; return 1;
+    }
+    if (cfg.auditCheck && !cfg.shouldRunCheck()) {
+        std::cerr << "error: audit requires topo-check; enable build.check and remove --no-check\n"; return 1;
+    }
 
     // Validate: we need sources (C++ or Rust), topo root, and output
     // Mixed projects get their sources from [build.cpp], not [build].sources
@@ -192,6 +207,18 @@ int main(int argc, char* argv[]) {
     // topo-build temp-directory cleanup race.
     fs::path tempDir = topo::platform::tempDirectory()
         / ("topo-build-" + std::to_string(TOPO_GETPID()));
+    std::unique_ptr<topo::platform::FileLock> auditBuildLock;
+    if (cfg.auditCheck) {
+        // Stable model paths make a review reusable for the same recipe;
+        // a lock serializes cooperating builds that share these intermediates.
+        const auto targetKey=topo::dist::sha256Hex(fs::absolute(cfg.outputPath).lexically_normal().string());
+        tempDir=projectDir/".topo-cache/audit-build"/targetKey;
+        if (fs::is_symlink(fs::symlink_status(tempDir))) { std::cerr << "error: audit build directory is a symlink\n"; return 1; }
+        fs::create_directories(tempDir);
+        auditBuildLock=std::make_unique<topo::platform::FileLock>(tempDir/"build.lock");
+        if (!auditBuildLock->tryAcquire()) { std::cerr << "error: another audit build holds this target; retry after it finishes\n"; return 1; }
+        if (cfg.auditReportPath.empty()) cfg.auditReportPath=(projectDir/".topo-cache/audit-report.json").string();
+    }
     fs::create_directories(tempDir);
 
     // ================================================================
@@ -376,50 +403,6 @@ int main(int argc, char* argv[]) {
     }
 
     // ================================================================
-    // Step 3: Run topo-check (per resolved check mode: CLI --check/--no-check
-    // > [build].check on/off > auto, where auto checks EVERY build — the
-    // incremental check cache keeps no-change rebuilds near zero cost)
-    // ================================================================
-    if (cfg.shouldRunCheck()) {
-        std::string checkTool = findBackendTool("topo-check");
-        if (checkTool.empty()) {
-            std::cerr << "error: topo-check not found (checks run on every build by default)\n"
-                      << "  Searched: executable directory, PATH\n"
-                      << "  Ensure topo-check is built and available, or pass --no-check.\n";
-            return 1;
-        }
-
-        std::cerr << "[3/7] Running topo-check...\n";
-        auto checkResult = topo::platform::runProcess(checkTool,
-            {"--project", projectDir.string()}, cfg.verbose);
-
-        if (checkResult.exitCode != 0) {
-            std::cerr << "error: topo-check failed (exit " << checkResult.exitCode << ")\n"
-                      << "  Fix declaration issues or use --no-check to skip.\n";
-            return 1;
-        }
-        std::cerr << "      All checks passed\n";
-    } else if (cfg.consumesDeclarationsForOptimization()) {
-        // Only reachable through an explicit opt-out: under the default
-        // [build].check=auto every build checks, so shouldRunCheck() is false
-        // only via --no-check / [build].check="off". Warn loudly when that
-        // opt-out coincides with an enabled declaration-consuming
-        // optimization — the optimization license rests on checked
-        // declarations, and this build proceeds without that license. (A
-        // plain-build opt-out skips nothing the optimizer relies on and
-        // stays quiet.)
-        const char* optOut = cfg.checkCliOverride.has_value()
-                                 ? "--no-check"
-                                 : "[build].check = \"off\"";
-        std::cerr << "warning: " << optOut << " skips topo-check, but an enabled optimization\n"
-                  << "  (parallel / loop-parallel / lifetime / forced pipeline) consumes .topo\n"
-                  << "  declarations that now enter the build UNVERIFIED. A wrong declaration\n"
-                  << "  can make the optimized program unsafe (data race, use-after-free).\n"
-                  << "  Remove the opt-out, or run topo-check separately before relying on\n"
-                  << "  this binary.\n";
-    }
-
-    // ================================================================
     // Steps 4-7: Delegate to backend tool via subprocess
     // ================================================================
 
@@ -479,6 +462,11 @@ int main(int argc, char* argv[]) {
     req.sources = cfg.sources;
     req.includeDirs = cfg.includeDirs;
     req.noIncremental = cfg.noIncremental;
+    req.evidence.mode = cfg.evidenceMode;
+    req.evidence.manifestPath = cfg.evidenceOutput.empty() ? "" : fs::absolute(cfg.evidenceOutput).string();
+    req.evidence.compilerSha256 = cfg.evidenceCompilerSha256;
+    req.evidence.linkerPath = cfg.evidenceLinkerPath;
+    req.evidence.linkerSha256 = cfg.evidenceLinkerSha256;
 
     // Write language-specific fields into backendExtras. Each key must
     // belong to the dispatched backend's sub-schema (registered in
@@ -503,12 +491,15 @@ int main(int argc, char* argv[]) {
         req.backendExtras["cargoPath"] = cfg.cargoPath;
     }
     if (cfg.language == topo::HostLanguage::Java) {
-        // Forward [build.java].target_version. Empty string means "fall back
-        // to the backend's compiled-in default" — topo-build-jvm-java keeps
-        // "21" as the fallback for projects that don't declare it.
+        // Use the same explicit toolchain and ordered lookup paths for the
+        // exported check model and the eventual javac invocation.
         if (!cfg.javaCfg.targetVersion.empty()) {
             req.backendExtras["targetVersion"] = cfg.javaCfg.targetVersion;
         }
+        if (!cfg.javaCfg.javaHome.empty()) req.backendExtras["javaHome"] = cfg.javaCfg.javaHome;
+        if (!cfg.javaCfg.classpath.empty()) req.backendExtras["classpath"] = cfg.javaCfg.classpath;
+        if (!cfg.javaCfg.jvmArgs.empty()) req.backendExtras["jvmArgs"] = cfg.javaCfg.jvmArgs;
+        if (!cfg.javaCfg.mainClass.empty()) req.backendExtras["mainClass"] = cfg.javaCfg.mainClass;
     }
     if (cfg.language == topo::HostLanguage::Mixed) {
         req.backendExtras["cargoPath"] = cfg.cargoPath;
@@ -547,6 +538,104 @@ int main(int argc, char* argv[]) {
     // dynamic-loader search path. A no-op on the build host (the tool's own
     // recorded paths resolve) and when no toolchain is resolved.
     topo::platform::ensureLLVMLoaderPathForChildren();
+
+    std::string backendCheckModel;
+    if (!cfg.evidenceMode.empty() || cfg.auditCheck) {
+        try {
+            const auto probe=topo::platform::runProcessCaptureWithTimeout(toolPath,{"--evidence-capabilities"},10000);
+            if (probe.exitCode!=0 || probe.stdoutOutput.size()>65536)
+                throw std::runtime_error("backend did not provide evidence capabilities");
+            const auto capability=nlohmann::json::parse(probe.stdoutOutput).at("evidence");
+            if (capability.at("protocolVersion")!=req.evidence.protocolVersion)
+                throw std::runtime_error("backend evidence protocol version mismatch");
+            if (!cfg.evidenceMode.empty()) {
+                bool supported=false;
+                for (const auto& mode:capability.at("modes")) if (mode==cfg.evidenceMode) supported=true;
+                if (!supported) throw std::runtime_error("backend does not support requested evidence mode: "+cfg.evidenceMode);
+            }
+            if (cfg.shouldRunCheck()) {
+                if (!capability.value("checkModel",false)) throw std::runtime_error("backend cannot bind checks to its actual compilation model");
+                backendCheckModel=(tempDir/"backend-check-model.json").string();
+                const auto generated=topo::platform::runProcessCaptureWithTimeout(toolPath,{"--check-model",requestFile.string(),"--output",backendCheckModel},30000);
+                if (generated.exitCode!=0) throw std::runtime_error("backend check model failed: "+generated.stderrOutput.substr(0,4096));
+                req.checkModelPath=backendCheckModel;
+                req.checkModelSha256=topo::dist::sha256File(backendCheckModel);
+                if (req.checkModelSha256.size()!=64) throw std::runtime_error("backend check model unavailable");
+                std::ofstream updated(requestFile); updated<<serializeBackendRequest(req);
+                if (!updated) throw std::runtime_error("cannot bind backend request to generated check model");
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "error: " << e.what() << '\n'; return 1;
+        }
+    }
+
+    // ================================================================
+    // Step 3: Run topo-check (per resolved check mode: CLI --check/--no-check
+    // > [build].check on/off > auto, where auto checks EVERY build — the
+    // incremental check cache keeps no-change rebuilds near zero cost)
+    // ================================================================
+    if (cfg.shouldRunCheck()) {
+        std::string checkTool = findBackendTool("topo-check");
+        if (checkTool.empty()) {
+            std::cerr << "error: topo-check not found (checks run on every build by default)\n"
+                      << "  Searched: executable directory, PATH\n"
+                      << "  Ensure topo-check is built and available, or pass --no-check.\n";
+            return 1;
+        }
+
+        // Pass the resolved configuration after CLI overrides to the checker.
+        // This data model is a selected recipe; backend execution supplies the
+        // separate command/build evidence.
+        const auto checkModelPath = tempDir / "resolved-check-model.json";
+        nlohmann::json checkModel={{"schemaVersion",1},{"language",(cfg.language == topo::HostLanguage::Java ? "java" : cfg.language == topo::HostLanguage::Rust ? "rust" : cfg.language == topo::HostLanguage::Python ? "python" : cfg.language == topo::HostLanguage::TypeScript ? "typescript" : cfg.language == topo::HostLanguage::Mixed ? "mixed" : "cpp")},
+            {"topoRoot",fs::absolute(cfg.topoRoot).string()},{"sources",cfg.sources},{"includeDirs",cfg.includeDirs},
+            {"compiler",cfg.hostCompilerPath},{"standard",cfg.standard},{"cppFlags",cfg.cppFlags}};
+        { std::ofstream stream(checkModelPath); stream << checkModel.dump(2); if (!stream) { std::cerr << "error: cannot write resolved check model\n"; return 1; } }
+        std::cerr << "[3/7] Running topo-check...\n";
+        std::vector<std::string> checkArgs={"--project",projectDir.string(),"--build-model",checkModelPath.string()};
+        if (cfg.auditCheck) {
+            checkArgs.insert(checkArgs.end(),{"--audit","--audit-report",cfg.auditReportPath});
+            if (!cfg.auditTrustStore.empty()) checkArgs.insert(checkArgs.end(),{"--trust-store",cfg.auditTrustStore});
+            for (const auto& root : cfg.auditAnalysisInputRoots)
+                checkArgs.insert(checkArgs.end(),{"--analysis-input-root",root});
+            if (!cfg.auditNativeEvidence.empty()) checkArgs.insert(checkArgs.end(),{"--native-evidence",cfg.auditNativeEvidence});
+            for (const auto& [id,path] : cfg.auditEvidenceRoots)
+                checkArgs.insert(checkArgs.end(),{"--evidence-root",id+"="+path});
+        }
+        if (!backendCheckModel.empty()) {
+            checkArgs.push_back(cfg.language==topo::HostLanguage::Java?"--java-project":"--cpp-project");
+            checkArgs.push_back(backendCheckModel);
+        }
+        auto checkResult = topo::platform::runProcess(checkTool,checkArgs,cfg.verbose);
+        if (!backendCheckModel.empty() && topo::dist::sha256File(backendCheckModel)!=req.checkModelSha256) {
+            std::cerr << "error: backend check model changed during audit\n"; return 1;
+        }
+
+        if (checkResult.exitCode != 0) {
+            std::cerr << "error: topo-check failed (exit " << checkResult.exitCode << ")\n"
+                      << "  Fix declaration issues or use --no-check to skip.\n";
+            return 1;
+        }
+        std::cerr << "      All checks passed\n";
+    } else if (cfg.consumesDeclarationsForOptimization()) {
+        // Only reachable through an explicit opt-out: under the default
+        // [build].check=auto every build checks, so shouldRunCheck() is false
+        // only via --no-check / [build].check="off". Warn loudly when that
+        // opt-out coincides with an enabled declaration-consuming
+        // optimization — the optimization license rests on checked
+        // declarations, and this build proceeds without that license. (A
+        // plain-build opt-out skips nothing the optimizer relies on and
+        // stays quiet.)
+        const char* optOut = cfg.checkCliOverride.has_value()
+                                 ? "--no-check"
+                                 : "[build].check = \"off\"";
+        std::cerr << "warning: " << optOut << " skips topo-check, but an enabled optimization\n"
+                  << "  (parallel / loop-parallel / lifetime / forced pipeline) consumes .topo\n"
+                  << "  declarations that now enter the build UNVERIFIED. A wrong declaration\n"
+                  << "  can make the optimized program unsafe (data race, use-after-free).\n"
+                  << "  Remove the opt-out, or run topo-check separately before relying on\n"
+                  << "  this binary.\n";
+    }
 
     // Invoke the backend tool
     std::cerr << "[4-7] Dispatching to " << toolName << "...\n";

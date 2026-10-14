@@ -17,6 +17,8 @@ namespace topo {
 
 struct CheckConfig {
     std::string projectDir = ".";
+    std::string cppProjectPath;
+    std::string buildModelPath;
     std::string javaProjectPath; // --java-project; otherwise [check].java_project
     std::string checkName = "all"; // completeness|containment|import-path|purity|visibility|stage-isolation|all
     std::string filter;
@@ -26,6 +28,18 @@ struct CheckConfig {
     bool deepMode = false;          // --deep: use L2 LSP analysis
     int jobs = 0;                   // --jobs N: 0 = auto (hardware_concurrency capped, max 16), 1 = sequential
     bool jobsExplicit = false;      // CLI flag set — overrides [check].jobs in Topo.toml
+    bool audit = false;
+    std::vector<std::string> analysisInputRoots; // Explicit CLI grants only.
+    std::string auditPolicyPath;
+    std::string auditReportPath;
+    std::string nativeEvidencePath;
+    std::map<std::string,std::string> evidenceRoots;
+    std::string trustStore;
+    std::string auditCacheDir; // Explicit reviewer-owned store; otherwise TOPO_AUDIT_CACHE_DIR.
+    std::string trustScope = "project";
+    std::string acceptReview;
+    std::string acceptDependency;
+    std::string revokeReview;
 };
 
 class CheckRunner {
@@ -88,6 +102,13 @@ private:
 
     // Detailed results from last run()
     std::vector<std::pair<std::string, check::CheckResult>> lastResults_;
+
+    std::vector<std::string> resolvedSources_;
+    std::vector<std::string> auditManualFiles_;
+    std::vector<std::pair<std::string, std::string>> auditManualMembers_; // Qualified name and physical source.
+    bool isAuditManual(const std::string& name, const std::string& file) const;
+    nlohmann::json auditCacheIdentity_;
+    std::string auditCacheStatus_ = "disabled", auditCacheReason_;
 
 };
 

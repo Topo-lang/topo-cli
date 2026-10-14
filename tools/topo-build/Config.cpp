@@ -118,6 +118,10 @@ void printUsage(const char* argv0) {
               << "  --dump-ir             Output optimized IR to <output>.ll\n"
               << "  --dump-map            Print symbol mapping\n"
               << "  --keep-temps          Keep intermediate files\n"
+              << "  --evidence <mode>     commands or isolated-build; writes detached build evidence\n"
+              << "  --evidence-output <file> Evidence manifest output (required with --evidence)\n"
+              << "  --evidence-compiler-sha256 <hash> Pin the isolated compiler\n"
+              << "  --evidence-linker <path> --evidence-linker-sha256 <hash> Pin the isolated linker\n"
               << "  --verbose             Print executed commands\n"
               << "  --debug-internal      Preserve internal symbols with __topo_internal_ prefix\n"
               << "  --mode <mode>         Build mode: dev (default) or aggressive\n"
@@ -127,6 +131,12 @@ void printUsage(const char* argv0) {
               << "  --no-incremental      Force full rebuild (skip cache)\n"
               << "  --clean               Remove .topo-cache/ before building\n"
               << "  --check               Run topo-check before building (overrides [build].check)\n"
+              << "  --audit               Audit the exact backend compilation model before building\n"
+              << "  --audit-report FILE   Save the audit for review (default .topo-cache/audit-report.json)\n"
+              << "  --trust-store FILE    Use a user-owned approval store outside the project\n"
+              << "  --analysis-input-root DIR Allow audit reads from an external data root (repeatable)\n"
+              << "  --native-evidence FILE Bind Java FFM audit to this native evidence manifest\n"
+              << "  --evidence-root ID=DIR Map native evidence roots to local files (repeatable)\n"
               << "  --no-check            Skip topo-check (overrides [build].check; warns when an\n"
               << "                        enabled optimization consumes declarations)\n"
               << "\nBy default ([build].check = \"auto\"), topo-check runs on EVERY build and a\n"
@@ -145,7 +155,16 @@ bool parseArgs(int argc, char* argv[], BuildConfig& cfg) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
 
-        if (arg == "--topo" && i + 1 < argc) {
+        std::string* evidenceValue = nullptr;
+        if (arg == "--evidence") evidenceValue = &cfg.evidenceMode;
+        else if (arg == "--evidence-output") evidenceValue = &cfg.evidenceOutput;
+        else if (arg == "--evidence-compiler-sha256") evidenceValue = &cfg.evidenceCompilerSha256;
+        else if (arg == "--evidence-linker") evidenceValue = &cfg.evidenceLinkerPath;
+        else if (arg == "--evidence-linker-sha256") evidenceValue = &cfg.evidenceLinkerSha256;
+        if (evidenceValue) {
+            if (i+1>=argc) { std::cerr << "error: " << arg << " requires a value\n"; return false; }
+            *evidenceValue=argv[++i];
+        } else if (arg == "--topo" && i + 1 < argc) {
             cfg.topoRoot = argv[++i];
         } else if (arg == "-o" && i + 1 < argc) {
             cfg.outputPath = argv[++i];
@@ -213,6 +232,25 @@ bool parseArgs(int argc, char* argv[], BuildConfig& cfg) {
             cfg.cleanCache = true;
         } else if (arg == "--check") {
             cfg.checkCliOverride = true;
+        } else if (arg == "--audit") {
+            cfg.auditCheck = true;
+        } else if (arg == "--native-evidence") {
+            if (i + 1 >= argc) { std::cerr << "error: --native-evidence requires a file\n"; return false; }
+            cfg.auditNativeEvidence = argv[++i];
+        } else if (arg == "--evidence-root") {
+            if (i + 1 >= argc) { std::cerr << "error: --evidence-root requires ID=DIR\n"; return false; }
+            const std::string entry = argv[++i];
+            const auto at = entry.find('=');
+            if (at == std::string::npos || at == 0 || at + 1 == entry.size() ||
+                !cfg.auditEvidenceRoots.emplace(entry.substr(0, at), entry.substr(at + 1)).second) {
+                std::cerr << "error: --evidence-root requires a unique nonempty ID=DIR\n"; return false;
+            }
+        } else if (arg == "--analysis-input-root") {
+            if (i + 1 >= argc) { std::cerr << "error: --analysis-input-root requires a directory\n"; return false; }
+            cfg.auditAnalysisInputRoots.emplace_back(argv[++i]);
+        } else if (arg == "--audit-report" || arg == "--trust-store") {
+            if (i+1>=argc) { std::cerr << "error: missing value for " << arg << '\n'; return false; }
+            (arg=="--audit-report" ? cfg.auditReportPath : cfg.auditTrustStore)=argv[++i];
         } else if (arg == "--no-check") {
             cfg.checkCliOverride = false;
         } else if (arg[0] != '-') {
@@ -230,6 +268,10 @@ bool parseArgs(int argc, char* argv[], BuildConfig& cfg) {
         }
     }
 
+    if ((!cfg.evidenceMode.empty() && cfg.evidenceMode != "commands" && cfg.evidenceMode != "isolated-build") ||
+        (cfg.evidenceMode.empty() != cfg.evidenceOutput.empty())) {
+        std::cerr << "error: evidence requires commands|isolated-build and --evidence-output\n"; return false;
+    }
     return true;
 }
 
@@ -324,9 +366,33 @@ bool loadTopoToml(BuildConfig& cfg) {
     // accidental misdeclaration in a non-Java project still surfaces, but
     // only consumed when language == Java).
     if (auto* javaTbl = tbl["build"]["java"].as_table()) {
-        warnUnknownKeys(*javaTbl, "[build.java]", {"target_version"});
-        if (auto v = (*javaTbl)["target_version"].value<std::string>()) {
-            cfg.javaCfg.targetVersion = *v;
+        warnUnknownKeys(*javaTbl, "[build.java]", {"target_version", "java_home", "classpath", "jvm_args", "main_class"});
+        for (const auto* key : {"target_version", "java_home", "main_class"}) {
+            if ((*javaTbl)[key] && !(*javaTbl)[key].is_string()) {
+                std::cerr << "error: [build.java]." << key << " must be a string\n";
+                return false;
+            }
+        }
+        if (auto v = (*javaTbl)["target_version"].value<std::string>()) cfg.javaCfg.targetVersion = *v;
+        if (auto v = (*javaTbl)["java_home"].value<std::string>(); v && !v->empty())
+            cfg.javaCfg.javaHome = (baseDir / *v).lexically_normal().string();
+        if (auto v = (*javaTbl)["main_class"].value<std::string>()) cfg.javaCfg.mainClass = *v;
+        for (const auto* key : {"classpath", "jvm_args"}) {
+            if (!(*javaTbl)[key]) continue;
+            auto* values = (*javaTbl)[key].as_array();
+            if (!values) {
+                std::cerr << "error: [build.java]." << key << " must be an array of strings\n";
+                return false;
+            }
+            auto& output = std::string(key) == "classpath" ? cfg.javaCfg.classpath : cfg.javaCfg.jvmArgs;
+            for (const auto& value : *values) {
+                auto text = value.value<std::string>();
+                if (!text || text->empty()) {
+                    std::cerr << "error: [build.java]." << key << " entries must be nonempty strings\n";
+                    return false;
+                }
+                output.push_back(std::string(key) == "classpath" ? (baseDir / *text).lexically_normal().string() : *text);
+            }
         }
     }
 
@@ -519,6 +585,10 @@ bool loadTopoToml(BuildConfig& cfg) {
     }
 
     // [build].link_libs — array of library names
+    if (tbl.at_path("check.audit.enabled") && !tbl.at_path("check.audit.enabled").is_boolean()) {
+        std::cerr << "error: check.audit.enabled must be boolean\n"; return false;
+    }
+    cfg.auditCheck = cfg.auditCheck || tbl.at_path("check.audit.enabled").value_or(false);
     if (auto* libs = tbl["build"]["link_libs"].as_array()) {
         for (const auto& elem : *libs) {
             if (auto lib = elem.value<std::string>()) cfg.linkLibs.push_back(*lib);

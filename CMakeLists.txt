@@ -182,14 +182,113 @@ install(FILES
 )
 
 # ── Tests ─────────────────────────────────────────────
+# Trust-store and policy tests live here; language end-to-end fixtures
+# also exercise the exported runner from the per-language packages.
 option(TOPO_CLI_BUILD_TESTS "Build topo-cli tests" OFF)
 if(TOPO_CLI_BUILD_TESTS AND (PROJECT_IS_TOP_LEVEL OR TOPO_META_DRIVING_TESTS))
     enable_testing()
+    find_package(GTest REQUIRED)
+    include(GoogleTest)
+    add_executable(topo-audit-support-tests test/audit/AuditSupportTest.cpp)
+    target_link_libraries(topo-audit-support-tests PRIVATE TopoCheckRunner GTest::gtest_main)
+    gtest_discover_tests(topo-audit-support-tests DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS audit)
+endif()
+
+# Tests can consume installed language tools as well as in-tree targets.
+set(TOPO_AUDIT_CPP_EXTRACTOR "" CACHE FILEPATH "Installed topo-extract-cpp for audit tests")
+set(TOPO_AUDIT_JAVA_EXTRACTOR_DIR "" CACHE PATH "Directory containing the Java extractor launcher and runtime descriptor")
+set(TOPO_AUDIT_JAVA_BACKEND "" CACHE FILEPATH "Installed topo-build-jvm-java for build audit tests")
+option(TOPO_CLI_REQUIRE_AUDIT_TESTS "Require the complete macOS C++/Java audit regression suite" OFF)
+if(TOPO_CLI_REQUIRE_AUDIT_TESTS AND (NOT TOPO_CLI_BUILD_TESTS OR NOT APPLE))
+    message(FATAL_ERROR "TOPO_CLI_REQUIRE_AUDIT_TESTS requires TOPO_CLI_BUILD_TESTS=ON on macOS")
+endif()
+set(_topo_audit_cpp_dir "")
+if(TARGET topo-extract-cpp)
+    set(_topo_audit_cpp_dir "$<TARGET_FILE_DIR:topo-extract-cpp>")
+elseif(TOPO_AUDIT_CPP_EXTRACTOR AND EXISTS "${TOPO_AUDIT_CPP_EXTRACTOR}")
+    get_filename_component(_topo_audit_cpp_dir "${TOPO_AUDIT_CPP_EXTRACTOR}" DIRECTORY)
+elseif(TARGET topo::lang-cpp::topo-extract-cpp)
+    set(_topo_audit_cpp_dir "$<TARGET_FILE_DIR:topo::lang-cpp::topo-extract-cpp>")
+endif()
+
+# Manual-file boundaries must preserve physical ownership across translation units.
+if(TOPO_CLI_BUILD_TESTS AND APPLE AND _topo_audit_cpp_dir AND TOPO_CLI_ENABLE_CPP_PLUGIN)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    find_program(TOPO_AUDIT_TEST_CLANG NAMES clang++ HINTS "${LLVM_TOOLS_BINARY_DIR}")
+    if(Python3_Interpreter_FOUND AND TOPO_AUDIT_TEST_CLANG)
+        add_test(NAME e2e.cli.cpp_audit
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/cpp_audit.py"
+                --check "$<TARGET_FILE:topo-check>"
+                --extractor-dir "${_topo_audit_cpp_dir}"
+                --compiler "${TOPO_AUDIT_TEST_CLANG}")
+        # The lifecycle repeatedly hashes the full loaded toolchain; unoptimized
+        # Debug SHA-256 costs more than each bounded extractor invocation.
+        set_tests_properties(e2e.cli.cpp_audit PROPERTIES LABELS "e2e;cpp;cli;audit" TIMEOUT 600)
+        add_test(NAME e2e.cli.cpp_audit_headers
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/cpp_audit_headers.py"
+                --check "$<TARGET_FILE:topo-check>"
+                --extractor-dir "${_topo_audit_cpp_dir}"
+                --compiler "${TOPO_AUDIT_TEST_CLANG}")
+        set_tests_properties(e2e.cli.cpp_audit_headers PROPERTIES LABELS "e2e;cpp;cli;audit" TIMEOUT 900)
+        add_test(NAME e2e.cli.cpp_audit_macro_headers
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/cpp_audit_macro_headers.py"
+                --check "$<TARGET_FILE:topo-check>"
+                --extractor-dir "${_topo_audit_cpp_dir}"
+                --compiler "${TOPO_AUDIT_TEST_CLANG}"
+                --evidence "${CMAKE_CURRENT_BINARY_DIR}/cpp-audit-macro-headers.json")
+        set_tests_properties(e2e.cli.cpp_audit_macro_headers PROPERTIES LABELS "e2e;cpp;cli;audit" TIMEOUT 900)
+        add_test(NAME e2e.cli.cpp_audit_isolation
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/cpp_audit_isolation.py"
+                --check "$<TARGET_FILE:topo-check>"
+                --extractor-dir "${_topo_audit_cpp_dir}"
+                --compiler "${TOPO_AUDIT_TEST_CLANG}")
+        set_tests_properties(e2e.cli.cpp_audit_isolation PROPERTIES LABELS "e2e;cpp;cli;audit" TIMEOUT 600)
+        add_test(NAME e2e.cli.cpp_audit_parent_inputs
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/cpp_audit_parent_inputs.py"
+                --check "$<TARGET_FILE:topo-check>"
+                --extractor-dir "${_topo_audit_cpp_dir}"
+                --compiler "${TOPO_AUDIT_TEST_CLANG}"
+                --evidence "${CMAKE_CURRENT_BINARY_DIR}/cpp-audit-parent-inputs.json")
+        set_tests_properties(e2e.cli.cpp_audit_parent_inputs PROPERTIES LABELS "e2e;cpp;cli;audit;isolation" TIMEOUT 900)
+        add_test(NAME e2e.cli.cpp_audit_path_semantics
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/cpp_audit_path_semantics.py"
+                --check "$<TARGET_FILE:topo-check>"
+                --extractor-dir "${_topo_audit_cpp_dir}"
+                --compiler "${TOPO_AUDIT_TEST_CLANG}"
+                --evidence "${CMAKE_CURRENT_BINARY_DIR}/cpp-audit-path-semantics.json")
+        set_tests_properties(e2e.cli.cpp_audit_path_semantics PROPERTIES LABELS "e2e;cpp;cli;audit;isolation" TIMEOUT 900)
+    endif()
+endif()
+
+# Other platforms exercise the explicit refusal path without needing an
+# extractor installation. Their audit capability remains unverified.
+if(TOPO_CLI_BUILD_TESTS AND NOT APPLE)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_executable(topo-analysis-launch-sentinel test/audit/AnalysisLaunchSentinel.cpp)
+        foreach(language IN ITEMS cpp java)
+            string(TOUPPER "${language}" language_upper)
+            if(TOPO_CLI_ENABLE_${language_upper}_PLUGIN)
+                add_test(NAME e2e.cli.${language}_audit_isolation_unsupported
+                    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/audit_isolation_unsupported.py"
+                        --check "$<TARGET_FILE:topo-check>" --language "${language}"
+                        --sentinel-executable "$<TARGET_FILE:topo-analysis-launch-sentinel>")
+                set_tests_properties(e2e.cli.${language}_audit_isolation_unsupported PROPERTIES
+                    LABELS "e2e;${language};cli;audit" TIMEOUT 60)
+            endif()
+        endforeach()
+    endif()
 endif()
 
 # Full Java project input path, including a real external class dependency.
 # The extractor and JDK are optional in standalone C++-only installations.
-if(TOPO_META_DRIVING_TESTS AND TARGET topo-extract-java AND TOPO_GRADLE_JAVA_HOME)
+set(_topo_audit_java_dir "${TOPO_AUDIT_JAVA_EXTRACTOR_DIR}")
+if(TARGET topo-extract-java)
+    set(_topo_audit_java_dir "${CMAKE_BINARY_DIR}")
+endif()
+if((TOPO_CLI_BUILD_TESTS OR TOPO_META_DRIVING_TESTS) AND _topo_audit_java_dir
+        AND TOPO_GRADLE_JAVA_HOME AND TOPO_CLI_ENABLE_JAVA_PLUGIN)
     enable_testing()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
@@ -198,8 +297,56 @@ if(TOPO_META_DRIVING_TESTS AND TARGET topo-extract-java AND TOPO_GRADLE_JAVA_HOM
                 --check "$<TARGET_FILE:topo-check>"
                 --transpile "$<TARGET_FILE:topo-transpile>"
                 --javac "${TOPO_GRADLE_JAVA_HOME}/bin/javac"
-                --extractor-dir "${CMAKE_BINARY_DIR}")
+                --extractor-dir "${_topo_audit_java_dir}")
         set_tests_properties(e2e.cli.java_project_model PROPERTIES
             LABELS "e2e;java;cli;project-model" TIMEOUT 180)
+        if(APPLE)
+            add_test(NAME e2e.cli.java_audit
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/java_audit.py"
+                    --check "$<TARGET_FILE:topo-check>" --extractor-dir "${_topo_audit_java_dir}")
+            set_tests_properties(e2e.cli.java_audit PROPERTIES LABELS "e2e;java;cli;audit" TIMEOUT 900)
+            add_test(NAME e2e.cli.java_audit_isolation
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/java_audit_isolation.py"
+                    --check "$<TARGET_FILE:topo-check>" --extractor-dir "${_topo_audit_java_dir}"
+                    --java-home "${TOPO_GRADLE_JAVA_HOME}")
+            set_tests_properties(e2e.cli.java_audit_isolation PROPERTIES LABELS "e2e;java;cli;audit;isolation" TIMEOUT 600)
+        endif()
+        # The aggregate build adds the JVM backend after this directory.
+        # Retain the command here and resolve its target after all siblings exist.
+        set_property(GLOBAL PROPERTY TOPO_JAVA_BUILD_AUDIT_COMMAND
+            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test/smoke/java_build_audit.py"
+            --build "$<TARGET_FILE:topo-build>" --check "$<TARGET_FILE:topo-check>"
+            --extractor-dir "${_topo_audit_java_dir}" --java-home "${TOPO_GRADLE_JAVA_HOME}")
     endif()
 endif()
+
+function(_topo_register_java_build_audit)
+    get_property(_audit_command GLOBAL PROPERTY TOPO_JAVA_BUILD_AUDIT_COMMAND)
+    if(APPLE AND _audit_command)
+        if(TARGET topo-build-jvm-java)
+            set(_backend "$<TARGET_FILE:topo-build-jvm-java>")
+        elseif(TOPO_AUDIT_JAVA_BACKEND AND EXISTS "${TOPO_AUDIT_JAVA_BACKEND}")
+            set(_backend "${TOPO_AUDIT_JAVA_BACKEND}")
+        endif()
+        if(_backend)
+            add_test(NAME e2e.cli.java_build_audit COMMAND ${_audit_command} --backend "${_backend}")
+            set_tests_properties(e2e.cli.java_build_audit PROPERTIES LABELS "e2e;java;cli;audit;build" TIMEOUT 600)
+        endif()
+    endif()
+    if(TOPO_CLI_REQUIRE_AUDIT_TESTS)
+        get_property(_topo_audit_source_dir GLOBAL PROPERTY TOPO_AUDIT_SOURCE_DIR)
+        get_property(_registered DIRECTORY "${_topo_audit_source_dir}" PROPERTY TESTS)
+        get_property(_deferred_registered DIRECTORY PROPERTY TESTS)
+        list(APPEND _registered ${_deferred_registered})
+        foreach(_required IN ITEMS cpp_audit cpp_audit_headers cpp_audit_macro_headers
+                cpp_audit_isolation cpp_audit_parent_inputs cpp_audit_path_semantics
+                java_audit java_audit_isolation java_build_audit)
+            if(NOT "e2e.cli.${_required}" IN_LIST _registered)
+                message(FATAL_ERROR "Required audit test e2e.cli.${_required} is missing; provide its installed extractor/backend, compiler and JDK")
+            endif()
+        endforeach()
+    endif()
+endfunction()
+# A property survives deferred evaluation in an aggregate parent scope.
+set_property(GLOBAL PROPERTY TOPO_AUDIT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _topo_register_java_build_audit)
